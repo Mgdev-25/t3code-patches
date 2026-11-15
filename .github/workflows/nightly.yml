@@ -47,7 +47,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # The newest list, not the commit of the dispatch: a list edit can land while a run waits in the queue.
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -76,7 +80,13 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add -A patches.json patches
             git commit -m "chore: drop the PRs that $TAG holds"
-            git push origin HEAD:main
+            # main can move during the run. Put the drop on top of it, and try again a few times.
+            for try in 1 2 3; do
+              git pull --rebase -q origin main && git push -q origin HEAD:main && exit 0
+              echo "push try $try failed"
+              sleep 5
+            done
+            exit 1
           fi
 
       - id: store
