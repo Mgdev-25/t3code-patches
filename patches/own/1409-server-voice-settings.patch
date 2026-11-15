@@ -277,7 +277,7 @@ index 0000000000..48af478f90
 +});
 +
 +it("keeps the raw transcript when cleanup fails", async () => {
-+  mocks.cleanup.mockReturnValue(Effect.fail(new Error("cleanup unavailable")));
++  mocks.cleanup.mockReturnValue(Effect.fail({ _tag: "CleanupUnavailable" as const }));
 +  chooseVoiceDestination(EnvironmentId.make("cleanup-on"));
 +  const unmount = appAtomRegistry.mount(voiceRouteAtom);
 +  const commitDraft = vi.fn();
