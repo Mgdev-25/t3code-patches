@@ -332,17 +332,23 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/release-apk"
           cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/release-apk/t3code-preview-$VERSION.apk"
 
-      - name: Check the APK signature
-        run: |
-          apksigner="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
-          "$apksigner" verify --print-certs "release-apk/t3code-preview-$VERSION.apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
-
+      # The upload comes first, so a failed check still leaves the APK to test. Publish takes it only on success.
       - uses: actions/upload-artifact@v4
         with:
           name: android
           path: release-apk/t3code-preview-${{ env.VERSION }}.apk
           compression-level: 0
           retention-days: 3
+
+      - name: Check the APK signature
+        run: |
+          apksigner="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          echo "apksigner: $apksigner"
+          if ! out="$("$apksigner" verify --print-certs "release-apk/t3code-preview-$VERSION.apk" 2>&1)"; then
+            echo "$out"
+            exit 1
+          fi
+          echo "$out" | grep -E 'certificate (DN|SHA-256)' || { echo "$out"; exit 1; }
 
   publish:
     needs: [plan, server, android]
@@ -393,7 +399,10 @@ jobs:
             node scripts/store.ts marker --archive "out/t3-$VERSION-linux-x64.tar.gz" --report out/PATCHES.json
             (cd out && sha256sum "t3-$VERSION-linux-x64.tar.gz" > SHA256SUMS)
           fi
-          if [ "$android" = built ]; then cp "$RUNNER_TEMP/in/android/t3code-preview-$VERSION.apk" out/; fi
+          if [ "$android" = built ]; then
+            cp "$RUNNER_TEMP/in/android/t3code-preview-$VERSION.apk" out/
+            (cd out && sha256sum "t3code-preview-$VERSION.apk" >> SHA256SUMS)
+          fi
           (cd out && sha256sum -c SHA256SUMS --ignore-missing)
           ls -l out
 
