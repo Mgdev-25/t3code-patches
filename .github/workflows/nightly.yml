@@ -283,8 +283,13 @@ jobs:
           corepack enable
           pnpm --version
 
+      # The workspace root holds the typecheck tools, @effect/tsgo and vite-plus.
       - name: Install mobile dependencies
-        run: pnpm install --frozen-lockfile --filter=@t3tools/mobile...
+        run: pnpm install --frozen-lockfile --filter=@t3tools/mobile... --filter=@t3tools/monorepo
+
+      # Metro strips types and checks none, so a patch that applies but no longer compiles shows here.
+      - name: Typecheck the phone app
+        run: pnpm --filter @t3tools/mobile typecheck
 
       - uses: actions/setup-java@v4
         with:
