@@ -1,0 +1,165 @@
+From f895693cc575a842fc5a7caceead14db3be0e40b Mon Sep 17 00:00:00 2001
+From: Morgan <noreply@example.invalid>
+Date: Sun, 15 Nov 2026 10:03:32 +0100
+Subject: [PATCH] fix(mobile): a notice link opens its chat after Android kills
+ the app
+
+When Android kills the process but keeps the task, a notice tap recreates
+MainActivity with its old launcher intent and sends the link to onNewIntent
+before React is ready. React Native drops it, and Linking.getInitialURL reads
+the old intent. A config plugin makes MainActivity keep the newest intent.
+
+Shell issue 1407.
+---
+ apps/mobile/app.config.ts                     |  1 +
+ .../plugins/withAndroidNewIntentLink.cjs      | 59 +++++++++++++++++++
+ .../plugins/withAndroidNewIntentLink.test.mjs | 59 +++++++++++++++++++
+ 3 files changed, 119 insertions(+)
+ create mode 100644 apps/mobile/plugins/withAndroidNewIntentLink.cjs
+ create mode 100644 apps/mobile/plugins/withAndroidNewIntentLink.test.mjs
+
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index 97fe5cf977..74af45cfa5 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -460,6 +460,7 @@ const config: ExpoConfig = {
+     // MainActivity mods run in reverse order; extend the tablet-orientation override.
+     "./plugins/withAndroidWindowDisplayMetrics.cjs",
+     "./plugins/withAndroidTabletOrientation.cjs",
++    "./plugins/withAndroidNewIntentLink.cjs",
+     ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
+   ],
+   extra: {
+diff --git a/apps/mobile/plugins/withAndroidNewIntentLink.cjs b/apps/mobile/plugins/withAndroidNewIntentLink.cjs
+new file mode 100644
+index 0000000000..5461f3d120
+--- /dev/null
++++ b/apps/mobile/plugins/withAndroidNewIntentLink.cjs
+@@ -0,0 +1,59 @@
++const { withMainActivity } = require("expo/config-plugins");
++
++// When Android kills the process but keeps the task, a notice tap recreates MainActivity with
++// its old launcher intent and sends the link to onNewIntent before onResume. React Native drops
++// a new intent while its context or JS is not ready, and Linking.getInitialURL reads the
++// activity intent. Keeping the newest intent there lets the cold start open the link.
++const NEW_INTENT_METHOD = `
++  // Linking.getInitialURL reads this intent. React drops a new intent that comes before JS runs.
++  override fun onNewIntent(intent: Intent) {
++    super.onNewIntent(intent)
++    setIntent(intent)
++  }
++`;
++
++function insertAfter(contents, anchor, insertion, description) {
++  const index = contents.indexOf(anchor);
++  if (index === -1) {
++    throw new Error(
++      `withAndroidNewIntentLink: could not find ${description} in MainActivity. The Expo template changed, so update the plugin anchors.`,
++    );
++  }
++  const end = index + anchor.length;
++  return contents.slice(0, end) + insertion + contents.slice(end);
++}
++
++module.exports = function withAndroidNewIntentLink(config) {
++  return withMainActivity(config, (nextConfig) => {
++    let contents = nextConfig.modResults.contents;
++    if (nextConfig.modResults.language !== "kt") {
++      throw new Error("withAndroidNewIntentLink: MainActivity must be Kotlin.");
++    }
++    if (contents.includes("setIntent(intent)")) {
++      return nextConfig;
++    }
++    if (contents.includes("override fun onNewIntent(")) {
++      throw new Error(
++        "withAndroidNewIntentLink: MainActivity already overrides onNewIntent. The Expo template changed, so add setIntent(intent) there.",
++      );
++    }
++
++    if (!contents.includes("import android.content.Intent\n")) {
++      contents = insertAfter(
++        contents,
++        "import android.os.Bundle",
++        "\nimport android.content.Intent",
++        "the android.os.Bundle import",
++      );
++    }
++    contents = insertAfter(
++      contents,
++      "class MainActivity : ReactActivity() {",
++      NEW_INTENT_METHOD,
++      "the MainActivity class declaration",
++    );
++
++    nextConfig.modResults.contents = contents;
++    return nextConfig;
++  });
++};
+diff --git a/apps/mobile/plugins/withAndroidNewIntentLink.test.mjs b/apps/mobile/plugins/withAndroidNewIntentLink.test.mjs
+new file mode 100644
+index 0000000000..26f4f5a32a
+--- /dev/null
++++ b/apps/mobile/plugins/withAndroidNewIntentLink.test.mjs
+@@ -0,0 +1,59 @@
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFS from "node:fs";
++import * as NodeModule from "node:module";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import { afterEach, describe, expect, it } from "vite-plus/test";
++
++const require = NodeModule.createRequire(import.meta.url);
++const { compileModsAsync } = require("expo/config-plugins");
++const withAndroidNewIntentLink = require("./withAndroidNewIntentLink.cjs");
++const template = NodeChildProcess.execFileSync(
++  "tar",
++  [
++    "-xOf",
++    NodePath.join(NodePath.dirname(require.resolve("expo/package.json")), "template.tgz"),
++    "package/android/app/src/main/java/com/helloworld/MainActivity.kt",
++  ],
++  { encoding: "utf8" },
++);
++const projectRoots = [];
++
++afterEach(() => {
++  for (const root of projectRoots.splice(0)) NodeFS.rmSync(root, { recursive: true, force: true });
++});
++
++async function prebuildMainActivity(contents) {
++  const projectRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "new-intent-link-plugin-"));
++  projectRoots.push(projectRoot);
++  const activityPath = NodePath.join(
++    projectRoot,
++    "android/app/src/main/java/com/helloworld/MainActivity.kt",
++  );
++  NodeFS.mkdirSync(NodePath.dirname(activityPath), { recursive: true });
++  NodeFS.writeFileSync(activityPath, contents);
++  await compileModsAsync(withAndroidNewIntentLink({ name: "T3 Code", slug: "t3code" }), {
++    projectRoot,
++    platforms: ["android"],
++  });
++  return NodeFS.readFileSync(activityPath, "utf8");
++}
++
++describe("withAndroidNewIntentLink", () => {
++  it("keeps a link from onNewIntent as the intent of the generated activity", async () => {
++    const result = await prebuildMainActivity(template);
++
++    const methods = [
++      ...result.matchAll(/^ {2}override fun onNewIntent\(intent: Intent\) \{\n([^]*?)^ {2}\}/gm),
++    ];
++    expect(methods).toHaveLength(1);
++    expect(methods[0][1].trim()).toMatch(/^super\.onNewIntent\(intent\)\s+setIntent\(intent\)$/);
++    expect(result.match(/^import android\.content\.Intent$/gm)).toHaveLength(1);
++  });
++
++  it("leaves the activity unchanged when prebuild runs again", async () => {
++    const once = await prebuildMainActivity(template);
++
++    expect(await prebuildMainActivity(once)).toBe(once);
++  });
++});
+-- 
+2.55.0
+

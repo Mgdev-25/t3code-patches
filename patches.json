@@ -20,5 +20,13 @@
       "file": "patches/upstream/pr-36186.patch"
     }
   ],
-  "own": []
+  "own": [
+    {
+      "id": "1407-notice-link",
+      "bug": 1407,
+      "file": "patches/own/1407-notice-link.patch",
+      "check": "Kill the app from Recents, tap a T3 notice: the app opens the chat of the notice, not the last chat. Steps: own-patches/1407-notice-link/report.md of Shell issue 1411.",
+      "dropWhen": "The upstream MainActivity of the tag already calls setIntent(intent) in onNewIntent."
+    }
+  ]
 }
