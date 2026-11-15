@@ -26,9 +26,11 @@ on:
 permissions:
   contents: write
 
+# One run at a time. `queue: max` keeps a waiting manual repair run when a cron run queues after it.
 concurrency:
   group: nightly
   cancel-in-progress: false
+  queue: max
 
 env:
   UPSTREAM: pingdotgg/t3code
@@ -424,9 +426,16 @@ jobs:
       - name: Publish the release
         env:
           REPLACE: ${{ inputs.replace }}
+          SERVER_STATE: ${{ steps.server.outputs.state }}
+          ANDROID_RESULT: ${{ needs.android.result }}
         run: |
           latest="$(jq -r .latest "$RUNNER_TEMP/in/plan/plan.json")"
           if [ "$REPLACE" = true ] && gh release view "$TAG" >/dev/null 2>&1; then
+            # A failed build never replaces a release that works.
+            if [ "$SERVER_STATE" = failed ] || { [ "$ANDROID_RESULT" != success ] && [ "$ANDROID_RESULT" != skipped ]; }; then
+              echo "::error::server $SERVER_STATE, android $ANDROID_RESULT: the existing $TAG release stays"
+              exit 1
+            fi
             gh release delete "$TAG" --yes --cleanup-tag
           fi
           gh release create "$TAG" --title "$VERSION" --notes-file out/notes.md --latest="$latest" --target main \
