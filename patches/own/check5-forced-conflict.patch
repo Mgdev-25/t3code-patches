@@ -1,6 +1,0 @@
-diff --git a/apps/server/src/cli/update.ts b/apps/server/src/cli/update.ts
---- a/apps/server/src/cli/update.ts
-+++ b/apps/server/src/cli/update.ts
-@@ -1,1 +1,1 @@
--this line is not in the upstream file
-+forced conflict for Shell issue 1411 check 5
