@@ -18,6 +18,12 @@
       "head": "ac701d674ae393df510e68220291efc89fffcb6f",
       "bug": 1409,
       "file": "patches/upstream/pr-36186.patch"
+    },
+    {
+      "pr": 33550,
+      "head": "27c83d5c0e7ffd3ac318904e18dcfab058a98bd1",
+      "bug": 1411,
+      "file": "patches/upstream/pr-33550.patch"
     }
   ],
   "own": [
@@ -27,6 +33,13 @@
       "file": "patches/own/1407-notice-link.patch",
       "check": "Kill the app from Recents, tap a T3 notice: the app opens the chat of the notice, not the last chat. Steps: own-patches/1407-notice-link/report.md of Shell issue 1411.",
       "dropWhen": "The upstream MainActivity of the tag already calls setIntent(intent) in onNewIntent."
+    },
+    {
+      "id": "check5-forced-conflict",
+      "bug": 1411,
+      "file": "patches/own/check5-forced-conflict.patch",
+      "check": "Temporary entry of check 5. It must be left out as does not apply.",
+      "dropWhen": "Remove it after check 5 of Shell issue 1411."
     }
   ]
 }
