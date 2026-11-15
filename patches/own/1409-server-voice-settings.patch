@@ -1,0 +1,310 @@
+diff --git a/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx b/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx
+index 6e891dd04e..0fef0a8942 100644
+--- a/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx
++++ b/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx
+@@ -25,7 +25,7 @@ import { createLazyVoiceRecorder } from "./lazyVoiceRecorder";
+ import { VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
+ import { VoiceInputSession } from "./voiceInputSession";
+ import { createVoiceRecordingPermission } from "./voiceRecordingPermission";
+-import { voiceRouteAtom } from "./voiceDestination";
++import { postProcessVoiceTranscript, voiceRouteAtom } from "./voiceDestination";
+ import { makePermissionStatusAtom } from "../../lib/permissionStatusAtom";
+ import {
+   acquireAudioSession,
+@@ -120,6 +120,7 @@ const voiceInputAtom = Atom.make((get) => {
+   });
+   const session: VoiceInputSession = new VoiceInputSession({
+     recorder,
++    postProcess: postProcessVoiceTranscript,
+     getTranscriber: () => {
+       const route = registry.get(voiceRouteAtom);
+       if (route) return route.transcriber;
+diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
+index a6f48d6959..14756f1225 100644
+--- a/apps/mobile/src/features/voice-input/voiceDestination.ts
++++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
+@@ -3,6 +3,7 @@ import {
+   type CloudSpeechModelId,
+   type CloudSpeechProvider,
+   type EnvironmentId,
++  type SpeechCustomWords,
+   DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
+   type VoiceTranscriptionDestination,
+ } from "@t3tools/contracts";
+@@ -11,6 +12,7 @@ import {
+   getCloudSpeechKeys,
+   getCloudSpeechModels,
+   requireCloudSpeechKey,
++  postProcessEnvironmentTranscript,
+   transcribeCloudPcm,
+   getEnvironmentSpeechStatus,
+   transcribeEnvironmentPcm,
+@@ -140,6 +142,7 @@ function environmentTranscriber(
+   prepared: PreparedConnection,
+   canSend: () => boolean,
+   speechLanguage: string,
++  speechCustomWords: SpeechCustomWords,
+   cloud?: CloudDestination,
+ ) {
+   const provider = cloud?.provider;
+@@ -193,7 +196,7 @@ function environmentTranscriber(
+             : transcribeEnvironmentPcm(
+                 prepared,
+                 pcm,
+-                { ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, speechLanguage },
++                { ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, speechLanguage, speechCustomWords },
+                 canSend,
+               ),
+           signal,
+@@ -203,6 +206,37 @@ function environmentTranscriber(
+   });
+ }
+ 
++export function postProcessVoiceTranscript(
++  transcript: string,
++  { signal }: { readonly signal: AbortSignal },
++): Promise<string> | null {
++  const grant = appAtomRegistry.get(voiceGrantAtom);
++  if (grant?.destination.kind !== "environment") return null;
++  const id = grant.destination.environmentId;
++  const connectionAtom = voiceConnectionAtom(id);
++  const connection = appAtomRegistry.get(connectionAtom);
++  const settings = appAtomRegistry.get(environmentPresentations.presentationAtom(id))?.serverConfig
++    ?.settings;
++  if (!connection || settings?.speechPostProcessingModelSelection == null) return null;
++  const canSend = () =>
++    appAtomRegistry.get(voiceGrantAtom) === grant &&
++    appAtomRegistry.get(connectionAtom) === connection;
++  return runSpeech(
++    postProcessEnvironmentTranscript(
++      connection,
++      transcript,
++      { text: "", selection: { start: 0, end: 0 } },
++      {
++        speechCustomWords: settings.speechProjectCustomWords,
++        speechPostProcessingPrompt: { mode: "default", customInstructions: "" },
++      },
++      canSend,
++    ),
++    signal,
++    canSend,
++  ).then((result) => result.text);
++}
++
+ const speechAtom = <A, E>(
+   id: EnvironmentId,
+   read: (prepared: PreparedConnection) => Effect.Effect<A, E, HttpClient.HttpClient>,
+@@ -256,6 +290,10 @@ export const voiceRouteAtom = Atom.make((get) => {
+   );
+   const connection = get(connectionAtom);
+   const speechLanguage = get(speechLanguageAtom);
++  const speechCustomWords = cloud
++    ? []
++    : (get(environmentPresentations.presentationAtom(grant.destination.environmentId))?.serverConfig
++        ?.settings?.speechProjectCustomWords ?? []);
+   const registry = get.registry;
+   return {
+     transcriber:
+@@ -264,6 +302,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+         connection,
+         () => registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection,
+         speechLanguage,
++        speechCustomWords,
+         cloud,
+       ),
+   };
+diff --git a/apps/mobile/src/features/voice-input/voiceServerSettings.test.ts b/apps/mobile/src/features/voice-input/voiceServerSettings.test.ts
+new file mode 100644
+index 0000000000..48af478f90
+--- /dev/null
++++ b/apps/mobile/src/features/voice-input/voiceServerSettings.test.ts
+@@ -0,0 +1,189 @@
++import { EnvironmentId, type SpeechCustomWords } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import { Atom, AsyncResult } from "effect/reactivity";
++import { beforeEach, expect, it, vi } from "vite-plus/test";
++import { appAtomRegistry } from "../../state/atom-registry";
++import {
++  VoiceInputController,
++  resetVoiceInputGlobalsForTests,
++} from "../../../../../packages/client-runtime/src/voice-input/controller";
++import {
++  chooseVoiceDestination,
++  postProcessVoiceTranscript,
++  voiceRouteAtom,
++} from "./voiceDestination";
++
++const mocks = vi.hoisted(() => ({
++  transcribe: vi.fn(),
++  cloudTranscribe: vi.fn(),
++  cleanup: vi.fn(),
++}));
++const words: SpeechCustomWords = [{ term: "ShellBug1409", aliases: ["shell bug"] }];
++
++vi.mock("@t3tools/client-runtime/voice-input", async () => ({
++  ...(await import("../../../../../packages/client-runtime/src/voice-input/transcription")),
++  ...(await import("../../../../../packages/client-runtime/src/voice-input/controller")),
++  getEnvironmentSpeechStatus: () => Effect.succeed({ supported: true, state: "ready" }),
++  requireCloudSpeechKey: () => Effect.void,
++  transcribeEnvironmentPcm: mocks.transcribe,
++  transcribeCloudPcm: mocks.cloudTranscribe,
++  postProcessEnvironmentTranscript: mocks.cleanup,
++}));
++vi.mock("expo", () => ({
++  requireOptionalNativeModule: () => ({ decodeRecording: async () => new Uint8Array([0, 0]) }),
++}));
++vi.mock("expo/fetch", () => ({ fetch: vi.fn() }));
++vi.mock("./voiceGrantStorage", () => ({
++  readVoiceGrant: async () => null,
++  writeVoiceGrant: vi.fn(),
++}));
++vi.mock("../../lib/uuid", () => ({ uuidv4: () => "voice-settings-test" }));
++vi.mock("../../state/preferences", () => ({
++  mobilePreferencesAtom: Atom.make(AsyncResult.success({ speechLanguage: "fr" })),
++}));
++vi.mock("../../connection/runtime", async () => ({
++  connectionAtomRuntime: Atom.runtime((await import("effect/http")).FetchHttpClient.layer),
++}));
++vi.mock("../../state/presentation", () => ({
++  environmentPresentations: {
++    presentationAtom: Atom.family((id: string) =>
++      Atom.make({
++        connection: { phase: "connected" },
++        serverConfig: {
++          environment: {
++            capabilities: { voiceTranscription: true, cloudVoiceTranscription: true },
++          },
++          settings: {
++            speechProjectCustomWords: words,
++            speechPostProcessingModelSelection: id === "cleanup-off" ? null : { provider: "test" },
++          },
++        },
++      }),
++    ),
++  },
++}));
++vi.mock("../../state/session", async () => {
++  const Option = await import("effect/Option");
++  return {
++    environmentSession: {
++      preparedConnectionValueAtom: Atom.family((environmentId: string) =>
++        Atom.make(Option.some({ environmentId })),
++      ),
++      sessionStateAtom: Atom.family(() => Atom.make(true)),
++    },
++    sessionHasScope: () => true,
++  };
++});
++
++beforeEach(() => {
++  appAtomRegistry.reset();
++  resetVoiceInputGlobalsForTests();
++  vi.clearAllMocks();
++  mocks.transcribe.mockReturnValue(Effect.succeed({ text: "please check shell bug" }));
++  mocks.cloudTranscribe.mockReturnValue(Effect.succeed({ text: "please check shell bug" }));
++  mocks.cleanup.mockReturnValue(Effect.succeed({ text: "Please check ShellBug1409." }));
++});
++
++it("sends the Project dictionary and keeps the phone language for environment transcription", async () => {
++  chooseVoiceDestination(EnvironmentId.make("cleanup-on"));
++  const unmount = appAtomRegistry.mount(voiceRouteAtom);
++  try {
++    const options = { signal: new AbortController().signal };
++    const recording = await appAtomRegistry.get(voiceRouteAtom)!.transcriber!.prepare(options);
++    await recording.transcribe("file:///voice.m4a", options);
++    expect(mocks.transcribe.mock.calls[0]?.[2]).toMatchObject({
++      speechCustomWords: words,
++      speechLanguage: "fr",
++    });
++  } finally {
++    unmount();
++  }
++});
++
++it.each([
++  ["cleanup-on", undefined, "Please check ShellBug1409.", true],
++  ["cleanup-off", undefined, "please check shell bug", false],
++  ["cleanup-on", "openai", "please check shell bug", false],
++] as const)("inserts the expected transcript for %s with cloud provider %s", async (id, provider, expected, cleanup) => {
++  chooseVoiceDestination(EnvironmentId.make(id), provider);
++  const unmount = appAtomRegistry.mount(voiceRouteAtom);
++  const commitDraft = vi.fn();
++  const controller = new VoiceInputController({
++    recorder: {
++      uri: "file:///voice.m4a",
++      prepareToRecordAsync: async () => {},
++      record: () => {},
++      stop: async () => {},
++    },
++    getTranscriber: () => appAtomRegistry.get(voiceRouteAtom)?.transcriber ?? null,
++    postProcess: postProcessVoiceTranscript,
++    requestPermission: async () => ({ granted: true, canAskAgain: true }),
++    configureRecording: async () => {},
++    releaseRecording: async () => {},
++    deleteRecording: () => {},
++    readDraft: () => ({ ownerKey: "test", text: "", selection: { start: 0, end: 0 } }),
++    commitDraft,
++    onStateChange: () => {},
++  });
++  try {
++    await controller.start();
++    await controller.stop();
++    expect(commitDraft.mock.calls[0]?.[0]).toBe(expected);
++    if (cleanup) {
++      expect(mocks.cleanup).toHaveBeenCalledWith(
++        expect.objectContaining({ environmentId: EnvironmentId.make(id) }),
++        "please check shell bug",
++        { text: "", selection: { start: 0, end: 0 } },
++        {
++          speechCustomWords: words,
++          speechPostProcessingPrompt: { mode: "default", customInstructions: "" },
++        },
++        expect.any(Function),
++      );
++    } else {
++      expect(mocks.cleanup).not.toHaveBeenCalled();
++    }
++    if (provider) {
++      expect(mocks.cloudTranscribe.mock.calls[0]?.[3]).toMatchObject({
++        speechCustomWords: [],
++        speechLanguage: "fr",
++      });
++    }
++  } finally {
++    controller.dispose();
++    unmount();
++  }
++});
++
++it("keeps the raw transcript when cleanup fails", async () => {
++  mocks.cleanup.mockReturnValue(Effect.fail(new Error("cleanup unavailable")));
++  chooseVoiceDestination(EnvironmentId.make("cleanup-on"));
++  const unmount = appAtomRegistry.mount(voiceRouteAtom);
++  const commitDraft = vi.fn();
++  const controller = new VoiceInputController({
++    recorder: {
++      uri: "file:///voice.m4a",
++      prepareToRecordAsync: async () => {},
++      record: () => {},
++      stop: async () => {},
++    },
++    getTranscriber: () => appAtomRegistry.get(voiceRouteAtom)?.transcriber ?? null,
++    postProcess: postProcessVoiceTranscript,
++    requestPermission: async () => ({ granted: true, canAskAgain: true }),
++    configureRecording: async () => {},
++    releaseRecording: async () => {},
++    deleteRecording: () => {},
++    readDraft: () => ({ ownerKey: "test", text: "", selection: { start: 0, end: 0 } }),
++    commitDraft,
++    onStateChange: () => {},
++  });
++  try {
++    await controller.start();
++    await controller.stop();
++    expect(mocks.cleanup).toHaveBeenCalledOnce();
++    expect(commitDraft.mock.calls[0]?.[0]).toBe("please check shell bug");
++  } finally {
++    controller.dispose();
++    unmount();
++  }
++});
