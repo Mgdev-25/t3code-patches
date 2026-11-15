@@ -18,12 +18,6 @@
       "head": "ac701d674ae393df510e68220291efc89fffcb6f",
       "bug": 1409,
       "file": "patches/upstream/pr-36186.patch"
-    },
-    {
-      "pr": 33550,
-      "head": "27c83d5c0e7ffd3ac318904e18dcfab058a98bd1",
-      "bug": 1411,
-      "file": "patches/upstream/pr-33550.patch"
     }
   ],
   "own": [
