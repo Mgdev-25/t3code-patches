@@ -1,0 +1,371 @@
+diff --git a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
+index 4b0ca00e8866..c20563851a19 100644
+--- a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
+@@ -3,6 +3,7 @@ import { useAtomSet, useAtomValue } from "@effect/atom-react";
+ import { AsyncResult } from "effect/reactivity";
+ import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync } from "expo-audio";
+ import { useState } from "react";
++import { cloudSpeechLanguages, effectiveSpeechLanguage } from "@t3tools/shared/speech";
+ import { Linking, Platform, useWindowDimensions, View } from "react-native";
+ import Reanimated, { ReduceMotion, useAnimatedStyle, withTiming } from "react-native-reanimated";
+ import { useSafeAreaInsets } from "react-native-safe-area-context";
+@@ -20,6 +21,7 @@ import {
+ import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
+ import { ListRowLayout } from "../../components/ui/ListRowLayout";
+ import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
++import { Sheet } from "../../components/ui/Sheet";
+ import * as Dialog from "../../components/ui/Dialog";
+ import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
+ import {
+@@ -27,9 +29,10 @@ import {
+   cloudVoiceConnectionAtom,
+   voiceConnectionAtom,
+   voiceGrantAtom,
++  voiceSpeechStatusAtom,
+   hasEnvironmentVoiceCapture,
+ } from "../voice-input/voiceDestination";
+-import { LocalModelChoice } from "./VoiceModelSection";
++import { languageLabel, LocalModelChoice } from "./VoiceModelSection";
+ import { CloudVoiceChoice } from "./CloudVoiceSection";
+ import type { VoiceGrant } from "../voice-input/voiceGrantStorage";
+ import type { EnvironmentId } from "@t3tools/contracts";
+@@ -203,6 +206,68 @@ function EnvironmentMethodSection({
+   );
+ }
+ 
++/** Offers the languages the chosen destination can transcribe, as web's Voice settings do. */
++function TranscriptionLanguageSection({ grant }: { grant: VoiceGrant }) {
++  const preferencesResult = useAtomValue(mobilePreferencesAtom);
++  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
++  const [open, setOpen] = useState(false);
++  const status = AsyncResult.getOrElse(
++    useAtomValue(voiceSpeechStatusAtom(grant.destination.environmentId)),
++    () => null,
++  );
++  const model =
++    grant.destination.kind === "cloud"
++      ? cloudSpeechLanguages
++      : status?.supported && status.languages
++        ? {
++            languages: status.languages,
++            supportsLanguageDetection: status.supportsLanguageDetection ?? false,
++          }
++        : null;
++  const preference = AsyncResult.isSuccess(preferencesResult)
++    ? (preferencesResult.value.speechLanguage ?? "auto")
++    : "auto";
++  const resolved = model ? effectiveSpeechLanguage(model, preference) : preference;
++  const resolvedLabel = resolved === "auto" ? "Auto-detect" : languageLabel(resolved);
++  const label =
++    preference !== "auto" && preference !== resolved
++      ? `${resolvedLabel} (${languageLabel(preference)} unavailable)`
++      : preference === "auto" && resolved !== "auto"
++        ? `Auto (${resolvedLabel})`
++        : resolvedLabel;
++  const ready = AsyncResult.isSuccess(preferencesResult) && !preferencesResult.waiting;
++  return (
++    <SettingsSection title="Transcription language">
++      <SettingsActionRow label={label} disabled={!ready || !model} onPress={() => setOpen(true)} />
++      {open && model ? (
++        <Sheet title="Transcription language" onClose={() => setOpen(false)}>
++          <ScrollView
++            contentInsetAdjustmentBehavior="automatic"
++            contentContainerClassName="px-5 pt-2 pb-8"
++          >
++            {[
++              "auto",
++              ...[...model.languages].sort((a, b) =>
++                languageLabel(a).localeCompare(languageLabel(b)),
++              ),
++            ].map((code) => (
++              <ListChoiceRow
++                key={code}
++                label={code === "auto" ? "Auto-detect" : languageLabel(code)}
++                selected={preference === code}
++                onPress={() => {
++                  savePreferences({ speechLanguage: code });
++                  setOpen(false);
++                }}
++              />
++            ))}
++          </ScrollView>
++        </Sheet>
++      ) : null}
++    </SettingsSection>
++  );
++}
++
+ export function SettingsVoiceRouteScreen() {
+   const transcriber = useAtomValue(localVoiceTranscriberAtom);
+   const grant = useAtomValue(voiceGrantAtom);
+@@ -320,6 +385,9 @@ export function SettingsVoiceRouteScreen() {
+             }
+           />
+         ) : null}
++        {hasEnvironmentVoiceCapture && grant ? (
++          <TranscriptionLanguageSection grant={grant} />
++        ) : null}
+         {!grant && transcriber === null ? (
+           <Text className="px-2 text-sm text-foreground-muted">{UNAVAILABLE_EXPLANATION}</Text>
+         ) : null}
+diff --git a/apps/mobile/src/features/settings/VoiceModelSection.tsx b/apps/mobile/src/features/settings/VoiceModelSection.tsx
+index 0bee9748b19c..fad4c8eb3828 100644
+--- a/apps/mobile/src/features/settings/VoiceModelSection.tsx
++++ b/apps/mobile/src/features/settings/VoiceModelSection.tsx
+@@ -118,7 +118,7 @@ const languageNames =
+   typeof Intl.DisplayNames === "function"
+     ? new Intl.DisplayNames(undefined, { type: "language" })
+     : null;
+-const languageLabel = (code: string) => languageNames?.of(code) ?? code.toUpperCase();
++export const languageLabel = (code: string) => languageNames?.of(code) ?? code.toUpperCase();
+ 
+ function ModelStats(props: { readonly model: EnvironmentSpeechModel; readonly language: string }) {
+   const { model, language } = props;
+diff --git a/apps/mobile/src/features/voice-input/voiceDestination.test.ts b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
+index 39ac3160f9ed..980bb22011d6 100644
+--- a/apps/mobile/src/features/voice-input/voiceDestination.test.ts
++++ b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
+@@ -1,5 +1,6 @@
+ import { EnvironmentId } from "@t3tools/contracts";
+-import { Atom } from "effect/reactivity";
++import { AsyncResult, Atom } from "effect/reactivity";
++import { decodeSpeechPcmRequest } from "@t3tools/shared/speech";
+ import { expect, it, vi } from "vite-plus/test";
+ import { appAtomRegistry } from "../../state/atom-registry";
+ import {
+@@ -17,11 +18,26 @@ const mocks = vi.hoisted(() => ({
+   markerWrite: vi.fn<(id: string) => void>(),
+   probe: vi.fn(),
+   fetch: vi.fn<typeof fetch>(),
++  preferencesChanged:
++    vi.fn<(preferences: { speechLanguage?: string; language?: string } | null) => void>(),
+ }));
+ vi.mock("expo", () => ({
+   requireOptionalNativeModule: () => ({ decodeRecording: async () => new Uint8Array([0, 0]) }),
+ }));
+ vi.mock("expo/fetch", () => ({ fetch: mocks.fetch }));
++vi.mock("../../state/preferences", () => {
++  const mobilePreferencesAtom = Atom.make<
++    AsyncResult.AsyncResult<{ speechLanguage?: string; language?: string }>
++  >(AsyncResult.success({ speechLanguage: "de" }));
++  mocks.preferencesChanged.mockImplementation((preferences) =>
++    appAtomRegistry.set(
++      mobilePreferencesAtom,
++      preferences === null ? AsyncResult.initial() : AsyncResult.success(preferences),
++    ),
++  );
++  return { mobilePreferencesAtom };
++});
++
+ vi.mock("expo-file-system", () => ({
+   Paths: { document: "file:///app/" },
+   File: class {
+@@ -165,6 +181,10 @@ it("keeps local as the default and never reuses consent for an offline or resele
+     const options = { signal: new AbortController().signal };
+     const recording = await current!.prepare(options);
+     await expect(recording.transcribe("file:///voice.m4a", options)).resolves.toBe("hello");
++    expect(
++      decodeSpeechPcmRequest(new Uint8Array(mocks.fetch.mock.calls[1]![1]!.body as ArrayBuffer))
++        .options.speechLanguage,
++    ).toBe("de");
+     expect(mocks.fetch.mock.calls.map(([url, init]) => [String(url), init?.redirect])).toEqual([
+       ["https://my-server.test/api/voice/status", "error"],
+       ["https://my-server.test/api/voice/transcribe", "error"],
+@@ -187,6 +207,10 @@ it("keeps local as the default and never reuses consent for an offline or resele
+       .mockResolvedValueOnce(Response.json({ text: "cloud" }));
+     const next = await appAtomRegistry.get(voiceRouteAtom)!.transcriber!.prepare(options);
+     await expect(next.transcribe("file:///voice.m4a", options)).resolves.toBe("cloud");
++    expect(
++      decodeSpeechPcmRequest(new Uint8Array(mocks.fetch.mock.lastCall![1]!.body as ArrayBuffer))
++        .options.speechLanguage,
++    ).toBe("de");
+     mocks.fetch.mockResolvedValueOnce(
+       Response.json(
+         {
+@@ -258,3 +282,20 @@ it("a late cloud key save cannot override a newer destination choice", () => {
+     appAtomRegistry.reset();
+   }
+ });
++
++it("keeps the recording route stable across unrelated preference updates and auto hydration", () => {
++  const unmount = appAtomRegistry.mount(voiceRouteAtom);
++  try {
++    chooseVoiceDestination(EnvironmentId.make("my-server"));
++    const germanRoute = appAtomRegistry.get(voiceRouteAtom);
++    mocks.preferencesChanged({ speechLanguage: "de", language: "fr" });
++    expect(appAtomRegistry.get(voiceRouteAtom)).toBe(germanRoute);
++    mocks.preferencesChanged(null);
++    const autoRoute = appAtomRegistry.get(voiceRouteAtom);
++    mocks.preferencesChanged({});
++    expect(appAtomRegistry.get(voiceRouteAtom)).toBe(autoRoute);
++  } finally {
++    unmount();
++    appAtomRegistry.reset();
++  }
++});
+diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
+index dd27cca67488..a6f48d6959df 100644
+--- a/apps/mobile/src/features/voice-input/voiceDestination.ts
++++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
+@@ -26,6 +26,7 @@ import { requireOptionalNativeModule } from "expo";
+ import { fetch as expoFetch } from "expo/fetch";
+ 
+ import { appAtomRegistry } from "../../state/atom-registry";
++import { mobilePreferencesAtom } from "../../state/preferences";
+ import { environmentPresentations } from "../../state/presentation";
+ import { environmentSession, sessionHasScope } from "../../state/session";
+ import { connectionAtomRuntime } from "../../connection/runtime";
+@@ -138,6 +139,7 @@ export function runSpeech<A, E>(
+ function environmentTranscriber(
+   prepared: PreparedConnection,
+   canSend: () => boolean,
++  speechLanguage: string,
+   cloud?: CloudDestination,
+ ) {
+   const provider = cloud?.provider;
+@@ -147,7 +149,7 @@ function environmentTranscriber(
+     prepare: async (signal) => {
+       if (provider) {
+         await runSpeech(requireCloudSpeechKey(prepared, provider), signal, canSend);
+-        return "auto";
++        return speechLanguage;
+       }
+       const status = await runSpeech(getEnvironmentSpeechStatus(prepared), signal, canSend);
+       if (!status.supported)
+@@ -164,9 +166,9 @@ function environmentTranscriber(
+               languages: status.languages,
+               supportsLanguageDetection: status.supportsLanguageDetection ?? false,
+             },
+-            "auto",
++            speechLanguage,
+           )
+-        : "auto";
++        : speechLanguage;
+     },
+     decode: (uri) => {
+       if (!native?.decodeRecording)
+@@ -184,14 +186,14 @@ function environmentTranscriber(
+                 prepared,
+                 provider,
+                 pcm,
+-                DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
++                { ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, speechLanguage },
+                 canSend,
+                 model,
+               )
+             : transcribeEnvironmentPcm(
+                 prepared,
+                 pcm,
+-                DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
++                { ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, speechLanguage },
+                 canSend,
+               ),
+           signal,
+@@ -239,6 +241,11 @@ export const voiceSpeechBenchmarksAtom = Atom.family((id: EnvironmentId) =>
+   speechAtom(id, (prepared) => getEnvironmentSpeechModels(prepared, true)),
+ );
+ 
++const speechLanguageAtom = Atom.make((get) => {
++  const preferences = get(mobilePreferencesAtom);
++  return AsyncResult.isSuccess(preferences) ? (preferences.value.speechLanguage ?? "auto") : "auto";
++});
++
+ // null selects on-device; a grant with no usable transcriber must never fall back.
+ export const voiceRouteAtom = Atom.make((get) => {
+   const grant = get(voiceGrantAtom);
+@@ -248,6 +255,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+     grant.destination.environmentId,
+   );
+   const connection = get(connectionAtom);
++  const speechLanguage = get(speechLanguageAtom);
+   const registry = get.registry;
+   return {
+     transcriber:
+@@ -255,6 +263,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+       environmentTranscriber(
+         connection,
+         () => registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection,
++        speechLanguage,
+         cloud,
+       ),
+   };
+diff --git a/apps/mobile/src/lib/storage.test.ts b/apps/mobile/src/lib/storage.test.ts
+index f6f928a15fd0..b8f16ec81031 100644
+--- a/apps/mobile/src/lib/storage.test.ts
++++ b/apps/mobile/src/lib/storage.test.ts
+@@ -134,6 +134,14 @@ describe("mobile connection storage", () => {
+     });
+   });
+ 
++  it("persists the transcription language and ignores invalid stored values", async () => {
++    await savePreferencesPatch({ speechLanguage: "de" });
++    await savePreferencesPatch({ baseFontSize: 18 });
++    await expect(loadPreferences()).resolves.toEqual({ speechLanguage: "de", baseFontSize: 18 });
++    mocks.setPreferencesJson(JSON.stringify({ speechLanguage: "x", baseFontSize: 18 }), 100);
++    await expect(loadPreferences()).resolves.toEqual({ baseFontSize: 18 });
++  });
++
+   it("loads legacy preferences when SQLite is unavailable", async () => {
+     mocks.setDatabaseFailures(true, true);
+     await mocks.setItemAsync("t3code.preferences", JSON.stringify({ baseFontSize: 17 }));
+diff --git a/apps/mobile/src/persistence/mobile-preferences.ts b/apps/mobile/src/persistence/mobile-preferences.ts
+index f29fbc8c119b..f261441a4068 100644
+--- a/apps/mobile/src/persistence/mobile-preferences.ts
++++ b/apps/mobile/src/persistence/mobile-preferences.ts
+@@ -13,6 +13,7 @@ import {
+   type ProviderInstanceId,
+   PullRequestMergeMethod,
+   type SidebarProjectGroupingMode,
++  SpeechLanguage,
+ } from "@t3tools/contracts";
+ import { ToolCallVisibility } from "@t3tools/contracts/settings";
+ import type { AndroidNavigationStyle } from "../lib/androidNavigationStyle";
+@@ -27,6 +28,7 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
+ const PREFERENCES_KEY = "t3code.preferences";
+ const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
+ const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
++const isSpeechLanguage = Schema.is(SpeechLanguage);
+ 
+ export const PullRequestListControls = Schema.Struct({
+   state: PullRequestListState,
+@@ -115,6 +117,7 @@ export interface Preferences {
+   readonly followUpBehavior?: FollowUpBehavior;
+   /** The client `language` setting: a locale code or "system". Unset means English. */
+   readonly language?: string;
++  readonly speechLanguage?: string;
+   readonly microphones?: ReadonlyArray<MicrophoneEntry>;
+   readonly projectGroupingEnabled?: boolean;
+   readonly projectGroupingMode?: SidebarProjectGroupingMode;
+@@ -201,6 +204,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
+     composerEnterBehavior?: ComposerEnterBehavior;
+     followUpBehavior?: FollowUpBehavior;
+     language?: string;
++    speechLanguage?: string;
+     microphones?: ReadonlyArray<MicrophoneEntry>;
+     projectGroupingEnabled?: boolean;
+     projectGroupingMode?: SidebarProjectGroupingMode;
+@@ -306,6 +310,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
+     preferences.followUpBehavior = parsed.followUpBehavior;
+   }
+   if (typeof parsed.language === "string") preferences.language = parsed.language;
++  if (isSpeechLanguage(parsed.speechLanguage)) {
++    preferences.speechLanguage = parsed.speechLanguage;
++  }
+   if (Array.isArray(parsed.microphones)) {
+     preferences.microphones = parsed.microphones.flatMap((entry): MicrophoneEntry[] => {
+       if (typeof entry !== "object" || entry === null || !isMicrophoneKind(entry.kind)) return [];
+diff --git a/docs/user/voice-input.md b/docs/user/voice-input.md
+index 592e110c896c..e964d762b128 100644
+--- a/docs/user/voice-input.md
++++ b/docs/user/voice-input.md
+@@ -10,6 +10,9 @@ On iPhone and Android, voice input transcribes on the device by default. To opt
+ to a named environment on that phone, open **Settings → Voice → Transcribe on**. See
+ [Voice input on mobile](./composer.md#voice-input-on-mobile).
+ 
++For environment or cloud transcription on mobile, choose **Transcription language**
++in Voice settings. The default is auto-detect. This choice does not affect on-device dictation.
++
+ ## Choose where audio goes
+ 
+ On web and desktop, you choose where transcription runs.

@@ -1,0 +1,2307 @@
+diff --git a/docs/user/providers-muse.md b/docs/user/providers-muse.md
+index df506e678bcc..1d51ff8d264f 100644
+--- a/docs/user/providers-muse.md
++++ b/docs/user/providers-muse.md
+@@ -9,8 +9,8 @@ and enable **Muse Code**. Set **Binary path** if Muse is not on the host's `PATH
+ Refresh provider status after installation or login, then select Muse in a
+ thread's model picker.
+ 
+-Provider status does not check your login. If you are signed out, messages
+-fail until you run `muse login` on the host.
++Provider status shows when Muse is signed out. Run `muse login` on the host,
++then refresh its status.
+ 
+ ## Sign-in and API keys
+ 
+@@ -43,6 +43,21 @@ Muse can list models that your account cannot use. If a message fails with
+ "does not exist or you lack access", pick another model, or add one your account
+ can use under **Custom models** in the instance settings.
+ 
++## Usage limits
++
++**Usage → Limits** shows your Meta subscription's session and weekly windows.
++T3 Code checks them when provider status refreshes, without sending a model
++message, on Muse versions supporting `muse usage --json` (1.4.13 or newer).
++Replies also update the windows. A failed refresh shows a provider warning and
++keeps the last reported limits. If Meta has not reported an allowance yet or
++your Muse version predates this command, limits appear after Muse's next reply. The same
++Meta account signed in on several hosts counts once when Muse reports the same
++email address on each host. If Muse reports only a display label, each connection
++counts separately because the label does not uniquely identify an account.
++
++With an API key, Limits shows none: a key names no Meta account to count
++them against.
++
+ ## Permissions and limitations
+ 
+ Muse offers two [permission modes](./permission-modes.md): **Supervised** asks
+diff --git a/docs/user/usage.md b/docs/user/usage.md
+index e6b3a46d5a14..ddf8bed3f76f 100644
+--- a/docs/user/usage.md
++++ b/docs/user/usage.md
+@@ -125,7 +125,8 @@ Claude resets are not available when the server runs on macOS, where Claude keep
+ Keychain. On narrow screens, numbered rows below
+ the bar show each account's quota, countdown, and credits. Tap a row to open its details.
+ 
+-The same account signed in on more than one environment, or reported by a hub as well, counts once.
++Connections identified by the same email address or credential fingerprint count once across
++environments and hubs. Connections without either identifier count separately.
+ Filter with the environment dropdown to see what a single machine has.
+ 
+ When a Claude or Codex account has no overall weekly quota left, its pooled session contribution
+@@ -165,8 +166,13 @@ Grok reports the remaining subscription allowance and reset time for its current
+ after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
+ or endpoint configurations do not report subscription limits.
+ 
+-Muse Code reports its session and weekly windows and its tier once the Muse CLI has run in a thread.
+-Until then it shows no limits. Readings are not kept across a server restart.
++Muse Code reports your Meta subscription's session and weekly windows when provider status
++refreshes (Muse 1.4.13 or newer) and with each reply. If the usage command is unavailable or
++returns no allowance, T3 Code keeps the last report for the same account, or waits for the next
++reply when none is available. Muse connections reporting the same email address count once
++across environments. Connections reporting only a display label count separately because
++labels do not uniquely identify accounts. With an API key, Muse does not report subscription
++limits.
+ 
+ API-key accounts may not report subscription limits. This also applies to Claude connections
+ using a proxy through `ANTHROPIC_AUTH_TOKEN`.
+diff --git a/packages/provider-core/src/server/managedProvider.test.ts b/packages/provider-core/src/server/managedProvider.test.ts
+index f878b2f44ecc..56367f00d838 100644
+--- a/packages/provider-core/src/server/managedProvider.test.ts
++++ b/packages/provider-core/src/server/managedProvider.test.ts
+@@ -891,7 +891,8 @@ describe("makeManagedServerProvider", () => {
+     { name: "no reading", hasUsage: false, clearPlan: false },
+     { name: "an empty reading after clearing the plan", hasUsage: true, clearPlan: true },
+     { name: "no reading after clearing the plan", hasUsage: false, clearPlan: true },
+-  ])("keeps the live plan and limits after $name", ({ hasUsage, clearPlan }) =>
++    { name: "a label-only account reading", hasUsage: true, clearPlan: false, labelOnly: true },
++  ])("keeps the live plan and limits after $name", ({ hasUsage, clearPlan, labelOnly }) =>
+     Effect.scoped(
+       Effect.gen(function* () {
+         const started = yield* Deferred.make<void>();
+@@ -910,7 +911,11 @@ describe("makeManagedServerProvider", () => {
+             }
+             return {
+               ...refreshedSnapshot,
+-              auth: { status: "authenticated", label: "tier-1" },
++              auth: {
++                status: "authenticated",
++                label: "tier-1",
++                ...(labelOnly ? { type: "accountLogin" as const } : {}),
++              },
+               ...(hasUsage
+                 ? { usageLimits: { checkedAt: refreshedSnapshot.checkedAt, windows: [] } }
+                 : {}),
+@@ -935,8 +940,14 @@ describe("makeManagedServerProvider", () => {
+         }
+         yield* Deferred.succeed(release, undefined);
+         const refreshed = yield* Fiber.join(refresh);
+-        assert.strictEqual(refreshed.auth.label, clearPlan ? undefined : "tier-2");
+-        assert.strictEqual(refreshed.usageLimits?.windows[0]?.usedPercent, 70);
++        assert.strictEqual(
++          refreshed.auth.label,
++          labelOnly ? "tier-1" : clearPlan ? undefined : "tier-2",
++        );
++        assert.strictEqual(
++          refreshed.usageLimits?.windows[0]?.usedPercent,
++          labelOnly ? undefined : 70,
++        );
+         assert.strictEqual(refreshed.usageLimits?.unavailable, undefined);
+       }),
+     ).pipe(Effect.provide(layerAlwaysRunTest)),
+@@ -971,6 +982,70 @@ describe("makeManagedServerProvider", () => {
+     ).pipe(Effect.provide(layerAlwaysRunTest)),
+   );
+ 
++  it.effect.each([
++    { name: "unknown to label", from: {}, to: { label: "Team B" }, switched: true },
++    { name: "unknown to email", from: {}, to: { email: "b@example.com" }, switched: true },
++    { name: "label to label", from: { label: "Team A" }, to: { label: "Team B" }, switched: true },
++    {
++      name: "label to email",
++      from: { label: "Team A" },
++      to: { email: "b@example.com" },
++      switched: true,
++    },
++    {
++      name: "email to label",
++      from: { email: "a@example.com" },
++      to: { label: "Team B" },
++      switched: true,
++    },
++    { name: "same label", from: { label: "Team A" }, to: { label: "Team A" }, switched: false },
++    {
++      name: "same email with different casing",
++      from: { email: "A@example.com" },
++      to: { email: "a@example.com" },
++      switched: false,
++    },
++  ])("keeps usage with its account on $name refreshes", ({ from, to, switched }) =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const published = {
++          checkedAt: "2026-04-10T00:05:00.000Z",
++          windows: [{ id: "session", kind: "session", label: "Session", usedPercent: 80 }],
++        } as const;
++        const probed = {
++          checkedAt: "2026-04-10T00:01:00.000Z",
++          windows: [{ id: "session", kind: "session", label: "Session", usedPercent: 10 }],
++        } as const;
++        const provider = yield* makeManagedServerProvider<TestSettings>({
++          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
++          getSettings: Effect.succeed({ enabled: true }),
++          streamSettings: Stream.empty,
++          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
++          initialSnapshot: () =>
++            Effect.succeed({
++              ...refreshedSnapshot,
++              auth: { status: "authenticated", type: "accountLogin", ...from },
++              usageLimits: published,
++            }),
++          checkProvider: Effect.succeed({
++            ...refreshedSnapshot,
++            auth: { status: "authenticated", type: "accountLogin", ...to },
++            usageLimits: probed,
++          }),
++          refreshOnInterval: false,
++        });
++        assert.deepStrictEqual(
++          (yield* provider.refresh).usageLimits,
++          switched ? probed : published,
++        );
++        assert.deepStrictEqual(
++          (yield* provider.refresh).usageLimits,
++          switched ? probed : published,
++        );
++      }),
++    ).pipe(Effect.provide(layerProviderHost({ runBackgroundWork: false }))),
++  );
++
+   it.effect("keeps sparse usage unavailable after probe failure until a full probe recovers", () =>
+     Effect.scoped(
+       Effect.gen(function* () {
+diff --git a/packages/provider-core/src/server/managedProvider.ts b/packages/provider-core/src/server/managedProvider.ts
+index 33a8273359d1..538c17b73150 100644
+--- a/packages/provider-core/src/server/managedProvider.ts
++++ b/packages/provider-core/src/server/managedProvider.ts
+@@ -201,8 +201,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+         const previous = state.snapshot.auth;
+         const differs = (a: string | undefined, b: string | undefined) =>
+           a !== undefined && b !== undefined && a !== b;
++        // Some account logins identify the account by display label instead of email.
++        const identity = (auth: ServerProvider["auth"]) =>
++          auth.email?.toLowerCase() ?? (auth.type === "accountLogin" ? auth.label : undefined);
+         const switchedAccount =
+-          differs(probedSnapshot.auth.email?.toLowerCase(), previous.email?.toLowerCase()) ||
++          (identity(probedSnapshot.auth) !== undefined && identity(previous) === undefined) ||
++          differs(identity(probedSnapshot.auth), identity(previous)) ||
+           (probedSnapshot.auth.workspaceId !== undefined &&
+             probedSnapshot.auth.workspaceId !== previous.workspaceId);
+         const usageLimits = switchedAccount
+@@ -217,7 +221,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+         const workspaceId =
+           usageLimits === probedSnapshot.usageLimits ? undefined : state.snapshot.auth.workspaceId;
+         const usageAuthLabel =
+-          !switchedAccount && usageLimits?.checkedAt === state.snapshot.usageLimits?.checkedAt
++          !switchedAccount &&
++          !(probedSnapshot.auth.type === "accountLogin" && !probedSnapshot.auth.email) &&
++          usageLimits?.checkedAt === state.snapshot.usageLimits?.checkedAt
+             ? state.usageAuthLabel
+             : undefined;
+         const labeledProbe =
+@@ -258,6 +264,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+               previous: state.snapshot.usageLimits,
+               update,
+               checkedAt: update.checkedAt,
++              ...(update.replace ? { replace: true } : {}),
+             });
+         const { auth } = state.snapshot;
+         const label = update.windows.length > 0 ? update.authLabel : undefined;
+diff --git a/packages/provider-core/src/server/snapshot.ts b/packages/provider-core/src/server/snapshot.ts
+index 2af61f3adcd0..84d15a7e6a19 100644
+--- a/packages/provider-core/src/server/snapshot.ts
++++ b/packages/provider-core/src/server/snapshot.ts
+@@ -13,6 +13,7 @@ export type ProviderUsageLimitsReport = ProviderUsageLimitsUpdate & {
+   readonly authLabel?: string;
+   /** A full reading replaces sparse windows and clears a previous probe failure. */
+   readonly complete?: boolean;
++  readonly replace?: boolean;
+ };
+ 
+ export interface ManagedServerProvider {
+diff --git a/packages/provider-core/src/server/usageLimits.test.ts b/packages/provider-core/src/server/usageLimits.test.ts
+index 2acdb0ba15d7..5004134f46bd 100644
+--- a/packages/provider-core/src/server/usageLimits.test.ts
++++ b/packages/provider-core/src/server/usageLimits.test.ts
+@@ -89,6 +89,89 @@ describe("applyUsageLimitsUpdate", () => {
+     ).toEqual({ checkedAt, windows: [weekly], unavailable: { reason: "probeFailed" } });
+   });
+ 
++  it("accepts a first whole-state report without a failure notice", () => {
++    expect(
++      applyUsageLimitsUpdate({
++        previous: undefined,
++        checkedAt,
++        update: { windows: [session, weekly] },
++        replace: true,
++      }),
++    ).toEqual(published);
++  });
++
++  it("clears all windows when a whole-state report is empty", () => {
++    expect(
++      applyUsageLimitsUpdate({
++        previous: published,
++        checkedAt,
++        update: { windows: [] },
++        replace: true,
++      }),
++    ).toEqual({ checkedAt, windows: [] });
++  });
++
++  it("clears a failed probe on replacement even when windows and time are unchanged", () => {
++    const previous = {
++      ...published,
++      unavailable: { reason: "probeFailed" as const, message: "Could not read limits." },
++    };
++    expect(
++      applyUsageLimitsUpdate({
++        previous,
++        checkedAt,
++        update: { windows: [session, weekly] },
++        replace: true,
++      }),
++    ).toEqual(published);
++    expect(
++      applyUsageLimitsUpdate({
++        previous,
++        checkedAt,
++        update: { windows: [{ ...session, usedPercent: 55 }] },
++      })?.unavailable,
++    ).toEqual(previous.unavailable);
++  });
++
++  it("replaces the windows outright when the update is the account's whole state", () => {
++    // Muse reports a window that has reset since with no reset time; a sparse
++    // merge would keep the expired one.
++    const restarted = {
++      id: "five_hour",
++      kind: "session",
++      label: "Session",
++      usedPercent: 0,
++      windowDurationMins: 300,
++    } as const;
++    expect(
++      applyUsageLimitsUpdate({
++        previous: published,
++        checkedAt: "2026-09-03T15:00:00.000Z",
++        update: { windows: [restarted] },
++        replace: true,
++      }),
++    ).toEqual({ checkedAt: "2026-09-03T15:00:00.000Z", windows: [restarted] });
++    // The same report again publishes nothing new.
++    expect(
++      applyUsageLimitsUpdate({
++        previous: published,
++        checkedAt,
++        update: { windows: [session, weekly] },
++        replace: true,
++      }),
++    ).toBe(published);
++    // A later report with the same windows publishes its time, so this account's
++    // report still counts as the freshest when Limits merges environments.
++    expect(
++      applyUsageLimitsUpdate({
++        previous: published,
++        checkedAt: "2026-09-03T12:00:05.000Z",
++        update: { windows: [session, weekly] },
++        replace: true,
++      }),
++    ).toEqual({ ...published, checkedAt: "2026-09-03T12:00:05.000Z" });
++  });
++
+   it("preserves reset credits and a $0 cap when a streamed window update changes usage", () => {
+     const resetCredits = { availableCount: 2, nextExpiresAt: "2026-10-01T00:00:00.000Z" };
+     const next = applyUsageLimitsUpdate({
+diff --git a/packages/provider-core/src/server/usageLimits.ts b/packages/provider-core/src/server/usageLimits.ts
+index 7d1f6e6a910e..d5a7619e0dbb 100644
+--- a/packages/provider-core/src/server/usageLimits.ts
++++ b/packages/provider-core/src/server/usageLimits.ts
+@@ -51,9 +51,30 @@ export function applyUsageLimitsUpdate(input: {
+   readonly previous: ServerProviderUsageLimits | undefined;
+   readonly update: ProviderUsageLimitsUpdate;
+   readonly checkedAt: string;
++  /** Replace the whole window set, including omitted resets and windows. */
++  readonly replace?: boolean;
+ }): ServerProviderUsageLimits | undefined {
+   const { previous, update } = input;
+-  if (update.windows.length === 0 || previous?.unavailable?.reason === "unsupported") {
++  if (previous?.unavailable?.reason === "unsupported") return previous;
++  if (input.replace) {
++    const next = makeUsageLimits({
++      checkedAt: input.checkedAt,
++      windows: update.windows.map((window) => ({
++        ...window,
++        usedPercent: clampPercent(window.usedPercent),
++      })),
++    });
++    if (
++      previous &&
++      !previous.unavailable &&
++      previous.checkedAt === next.checkedAt &&
++      previous.windows.length === next.windows.length &&
++      previous.windows.every((window, index) => usageWindowEquals(window, next.windows[index]!))
++    )
++      return previous;
++    return { ...next, ...(previous?.resetCredits ? { resetCredits: previous.resetCredits } : {}) };
++  }
++  if (update.windows.length === 0) {
+     return previous;
+   }
+   const merged = new Map(previous?.windows.map((window) => [window.id, window] as const));
+diff --git a/packages/provider-muse/src/server/adapter.test.ts b/packages/provider-muse/src/server/adapter.test.ts
+index 76b46715c602..f2b1f850ff04 100644
+--- a/packages/provider-muse/src/server/adapter.test.ts
++++ b/packages/provider-muse/src/server/adapter.test.ts
+@@ -42,7 +42,6 @@ import type { MuseItem, MuseSubscriptionUsage } from "./protocol.ts";
+ import type { MuseSdkHost, MuseSdkHostOptions } from "./sdk.ts";
+ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+-import type { ProviderUsageLimitsReport } from "@t3tools/provider-core/server/snapshot";
+ import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+ import { makeMuseAdapterV2, type MuseAdapterV2Options } from "./adapter.ts";
+ 
+@@ -187,10 +186,11 @@ const makeFakeMuse = Effect.fnUntraced(function* (idPrefix = "native") {
+       Effect.sync(() => {
+         notify({ jsonrpc: "2.0", method, params: { sessionId, ...params } });
+       }),
+-    emitHostWide: (method: string, params: Record<string, unknown>) =>
+-      Effect.sync(() => {
+-        notify({ jsonrpc: "2.0", method, params });
+-      }),
++    /** A notification about the host or account rather than a session, as `usage/changed` is. */ emitHostWide:
++      (method: string, params: Record<string, unknown>) =>
++        Effect.sync(() => {
++          notify({ jsonrpc: "2.0", method, params });
++        }),
+     takeCall: Effect.fnUntraced(function* (method: string) {
+       while (true) {
+         const call = yield* Queue.take(requests);
+@@ -209,7 +209,12 @@ const makeHarness = Effect.fnUntraced(function* (
+   policy = runtimePolicy,
+   overrides: Pick<
+     MuseAdapterV2Options,
+-    "createHost" | "nativeEventLogger" | "modelCatalog" | "continuationRequests" | "onUsageLimits"
++    | "createHost"
++    | "nativeEventLogger"
++    | "modelCatalog"
++    | "continuationRequests"
++    | "onSubscriptionUsage"
++    | "usageAccountGeneration"
+   > = {},
+ ) {
+   let hostCount = 0;
+@@ -361,6 +366,7 @@ const startConversation = Effect.fnUntraced(function* (
+   return { nativeId: call.commandId!, providerTurn: event.providerTurn };
+ });
+ 
++// `usage/changed` as Muse 1.4.3 sent it after a reply (2026-10-08), with a placeholder tier.
+ const SUBSCRIPTION_USAGE = {
+   window: { usedPercent: 0, windowDurationMins: 300, resetsAtMs: 1791465557000 },
+   weekly: { usedPercent: 5, resetsAtMs: 1791763200000 },
+@@ -371,7 +377,6 @@ const QUOTA_MESSAGE =
+   "API error 429: Subscription quota exhausted. Your usage window resets soon. (rate_limit_error)";
+ const RELAYED_QUOTA_MESSAGE =
+   "API error 429: All credentials for model muse-wonder-1.0-contributor are cooling down (last error: rate_limit_exceeded: Subscription quota exhausted. Your usage window resets at 2026-10-13T10:45:52Z.) (after 10 provider attempts)";
+-
+ const approval = (turnId: string) => ({
+   approvalId: "approval-1",
+   turnId,
+@@ -608,7 +613,7 @@ describe("MuseAdapterV2", () => {
+   it.effect("stops at a Meta usage limit until every exhausted window resets", () =>
+     Effect.gen(function* () {
+       const fake = yield* makeFakeMuse();
+-      const reports: Array<ProviderUsageLimitsReport> = [];
++      const reports: Array<MuseSubscriptionUsage> = [];
+       const harness = yield* makeHarness(
+         fake,
+         INSTANCE_ID,
+@@ -616,7 +621,7 @@ describe("MuseAdapterV2", () => {
+         undefined,
+         undefined,
+         runtimePolicy,
+-        { onUsageLimits: (report) => Effect.sync(() => void reports.push(report)) },
++        { onSubscriptionUsage: (report) => Effect.sync(() => void reports.push(report)) },
+       );
+       yield* fake.emitHostWide("usage/changed", {
+         ...SUBSCRIPTION_USAGE,
+@@ -635,8 +640,8 @@ describe("MuseAdapterV2", () => {
+       assert.strictEqual(terminal.failure?.class, "usage_limit");
+       assert.strictEqual(terminal.failure?.resetAt, "2026-10-08T13:19:17.000Z");
+       assert.deepStrictEqual(
+-        reports.map((report) => [report.authLabel, report.windows[0]?.usedPercent]),
+-        [["tier-1", 100]],
++        reports.map((report) => [report.tier, report.window.usedPercent]),
++        [["tier-1", 103]],
+       );
+       assert.isTrue(
+         harness.allEvents.some(
+@@ -699,7 +704,7 @@ describe("MuseAdapterV2", () => {
+   it.effect("skips an unreadable usage report without ending the session", () =>
+     Effect.gen(function* () {
+       const fake = yield* makeFakeMuse();
+-      const reports: Array<ProviderUsageLimitsReport> = [];
++      const reports: Array<MuseSubscriptionUsage> = [];
+       const harness = yield* makeHarness(
+         fake,
+         INSTANCE_ID,
+@@ -707,7 +712,7 @@ describe("MuseAdapterV2", () => {
+         undefined,
+         undefined,
+         runtimePolicy,
+-        { onUsageLimits: (report) => Effect.sync(() => void reports.push(report)) },
++        { onSubscriptionUsage: (report) => Effect.sync(() => void reports.push(report)) },
+       );
+       yield* fake.emitHostWide("usage/changed", { window: "not usage" });
+       yield* fake.emitHostWide("usage/changed", {
+@@ -728,6 +733,42 @@ describe("MuseAdapterV2", () => {
+     }).pipe(Effect.scoped, Effect.provide(testLayer)),
+   );
+ 
++  it.effect("hands Meta's subscription usage to the instance, with or without a turn", () =>
++    Effect.gen(function* () {
++      const fake = yield* makeFakeMuse();
++      const reports: Array<readonly [MuseSubscriptionUsage, number]> = [];
++      let generation = 3;
++      const harness = yield* makeHarness(
++        fake,
++        INSTANCE_ID,
++        undefined,
++        undefined,
++        undefined,
++        runtimePolicy,
++        {
++          onSubscriptionUsage: (usage, accountGeneration) =>
++            Effect.sync(() => void reports.push([usage, accountGeneration])),
++          usageAccountGeneration: Effect.sync(() => generation),
++        },
++      );
++      // A report counts for the generation its host started under, not the current one.
++      generation = 4;
++      yield* fake.emitHostWide("usage/changed", SUBSCRIPTION_USAGE);
++      yield* fake.emitHostWide("usage/changed", { window: "not usage" });
++      // A reset no Date can hold would throw once formatted, so the report is skipped too.
++      yield* fake.emitHostWide("usage/changed", {
++        ...SUBSCRIPTION_USAGE,
++        weekly: { usedPercent: 5, resetsAtMs: 1e16 },
++      });
++      const { nativeId } = yield* startConversation(harness, fake);
++      yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
++      const terminal = yield* harness.takeEvent("turn.terminal");
++      assert.strictEqual(terminal.status, "completed");
++      assert.deepStrictEqual(reports, [[SUBSCRIPTION_USAGE, 3]]);
++      assert.strictEqual(fake.closeCount(), 0);
++    }).pipe(Effect.scoped, Effect.provide(testLayer)),
++  );
++
+   it.effect("moves a resumed session on another model back to the catalog default", () =>
+     Effect.gen(function* () {
+       const fake = yield* makeFakeMuse();
+diff --git a/packages/provider-muse/src/server/adapter.ts b/packages/provider-muse/src/server/adapter.ts
+index dbf27ebea95a..4fa2c24f9d5d 100644
+--- a/packages/provider-muse/src/server/adapter.ts
++++ b/packages/provider-muse/src/server/adapter.ts
+@@ -63,11 +63,7 @@ import {
+   museApprovalOptions,
+   type MuseItem,
+ } from "./protocol.ts";
+-import {
+-  isMuseUsageLimitFailure,
+-  museUsageLimitResetAt,
+-  museUsageToLimits,
+-} from "./usageLimits.ts";
++import { isMuseUsageLimitFailure, museUsageLimitResetAt } from "./usageLimits.ts";
+ import {
+   createMuseSdkHostEffect,
+   MuseSdkError,
+@@ -79,7 +75,6 @@ import {
+   type MuseSdkHost,
+ } from "./sdk.ts";
+ import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+-import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
+ import {
+   providerMessageTextWithAttachmentPaths,
+   isProviderNativeImageAttachment,
+@@ -207,13 +202,21 @@ export interface MuseAdapterV2Options {
+   readonly createHost?: typeof createMuseSdkHost;
+   readonly requestTimeoutMs?: number;
+   readonly nativeEventLogger?: ProviderEventLoggers.EventNdjsonLogger;
+-  /** Receives every account-wide usage report, whichever session's host sent it. */
+-  readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
+   readonly continuationRequests?: {
+     readonly offer: (
+       request: ProviderContinuationRequests.ProviderContinuationRequest,
+     ) => Effect.Effect<void>;
+   };
++  /**
++   * Receives each subscription usage report (`usage/changed`) from this adapter's hosts,
++   * with the account generation the reporting host started under.
++   */
++  readonly onSubscriptionUsage?: (
++    usage: MuseSubscriptionUsage,
++    accountGeneration: number,
++  ) => Effect.Effect<void>;
++  /** The instance's account generation, read as each host starts, since reports name no account. */
++  readonly usageAccountGeneration?: Effect.Effect<number>;
+ }
+ 
+ interface ActiveTurn {
+@@ -349,6 +352,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
+       const eventPermit = yield* Semaphore.make(1);
+       let host: MuseSdkHost;
+       let hostEpoch = 0;
++      // The account generation the current host started under; see usageAccountGeneration.
++      let hostAccountGeneration = 0;
+       let closed = false;
+       let broken = false;
+       // Only idle host failures can be retried on this runtime.
+@@ -1382,12 +1387,12 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
+       });
+       const handleNotification = Effect.fnUntraced(function* (method: string, data: unknown) {
+         const params = yield* decode(recordSchema, data);
+-        // usage/changed is account-wide and carries no session ID.
++        // Account-wide, so it names no session: Meta's subscription windows after a response.
+         if (method === "usage/changed") {
+-          latestSubscriptionUsage = yield* decode(MuseSubscriptionUsage, params);
+-          if (options.onUsageLimits) {
+-            yield* options.onUsageLimits(museUsageToLimits(latestSubscriptionUsage));
+-          }
++          const usage = yield* decode(MuseSubscriptionUsage, params);
++          latestSubscriptionUsage = usage;
++          if (options.onSubscriptionUsage)
++            yield* options.onSubscriptionUsage(usage, hostAccountGeneration);
+           return;
+         }
+         if (params.sessionId !== nativeSessionId) return;
+@@ -1774,6 +1779,9 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
+       );
+       const launchHost = Effect.fnUntraced(function* () {
+         const epoch = ++hostEpoch;
++        hostAccountGeneration = options.usageAccountGeneration
++          ? yield* options.usageAccountGeneration
++          : 0;
+         const mcpSession = yield* mcpSessions.read(input.threadId);
+         const environment = McpProviderSession.withAgentDeviceEnvironment(
+           options.environment,
+diff --git a/packages/provider-muse/src/server/driver.ts b/packages/provider-muse/src/server/driver.ts
+index 197a219e54ec..0efabc4fbdc5 100644
+--- a/packages/provider-muse/src/server/driver.ts
++++ b/packages/provider-muse/src/server/driver.ts
+@@ -1,12 +1,13 @@
+-import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
++import { ProviderDriverKind } from "@t3tools/contracts";
+ import { MuseSettings } from "../settings.ts";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
++import * as DateTime from "effect/DateTime";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+-import * as Ref from "effect/Ref";
+-import * as Semaphore from "effect/Semaphore";
+ import * as Path from "effect/Path";
++import * as Ref from "effect/Ref";
+ import * as Schema from "effect/Schema";
++import * as Semaphore from "effect/Semaphore";
+ import * as HttpClient from "effect/http/HttpClient";
+ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+ 
+@@ -22,11 +23,18 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
+ import { checkMuseProviderStatus, makePendingMuseProvider } from "./status.ts";
+ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+ import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
+-import type { ProviderUsageLimitsReport } from "@t3tools/provider-core/server/snapshot";
+-import { makeUsageLimits } from "@t3tools/provider-core/server/usageLimits";
+ import { enrichMuseSnapshot, latestMuseVersion, museMaintenance } from "./maintenance.ts";
+ import { makeMuseEnvironment } from "./sdk.ts";
++import type { MuseSubscriptionUsage } from "./protocol.ts";
++import {
++  museUsageAccount,
++  museUsageAuth,
++  museUsageWindows,
++  type MuseUsageAccount,
++} from "./usageLimits.ts";
++import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
+ import { museUsageReader } from "./usage.ts";
++import { refreshMuseUsage } from "./usageProbe.ts";
+ import type * as MuseUsageHome from "./MuseUsageHome.ts";
+ import {
+   defaultProviderContinuationIdentity,
+@@ -108,27 +116,30 @@ export const MuseDriver: ProviderDriver<
+       accentColor,
+       continuationGroupKey: continuationIdentity.continuationKey,
+     });
+-    // Only a running CLI reports usage; status probes cannot fetch it.
+-    const latestUsage = yield* Ref.make<ProviderUsageLimitsReport | undefined>(undefined);
+-    const usagePermit = yield* Semaphore.make(1);
+-    const withLatestUsage = (provider: ServerProvider) =>
+-      Ref.get(latestUsage).pipe(
+-        Effect.map((report): ServerProvider =>
+-          report
+-            ? {
+-                ...provider,
+-                ...(report.authLabel
+-                  ? { auth: { ...provider.auth, label: report.authLabel } }
+-                  : {}),
+-                usageLimits: makeUsageLimits({
+-                  checkedAt: report.checkedAt,
+-                  windows: report.windows,
+-                }),
+-              }
+-            : provider,
+-        ),
+-      );
+     const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
++    // Keep CLI observations and streamed reports in the same account generation.
++    const usageAccount = yield* Ref.make<MuseUsageAccount>({
++      generation: 0,
++      identity: undefined,
++    });
++    const latestUsage = yield* Ref.make<
++      { readonly usage: MuseSubscriptionUsage; readonly generation: number } | undefined
++    >(undefined);
++    // Serialize state changes and publication; CLI reads run outside this permit
++    // so slow refreshes cannot block the adapter's notification stream.
++    const usagePermit = yield* Semaphore.make(1);
++    const withUsageLimits = Effect.fn("MuseDriver.withUsageLimits")(function* (
++      provider: ServerProviderDraft,
++    ) {
++      const refreshed = yield* refreshMuseUsage({
++        settings: effectiveConfig,
++        environment: processEnvironment,
++        cwd,
++        provider,
++        state: { account: usageAccount, latestUsage, permit: usagePermit },
++      });
++      return refreshed.provider;
++    });
+     const resolveInstallation = yield* makeCachedProviderMaintenanceResolution(
+       resolveProviderMaintenanceCapabilitiesEffect(museMaintenance, {
+         binaryPath: effectiveConfig.binaryPath,
+@@ -171,8 +182,8 @@ export const MuseDriver: ProviderDriver<
+       initialSnapshot: (settings) =>
+         makePendingMuseProvider(settings.provider).pipe(Effect.map(stampIdentity)),
+       checkProvider: checkMuseProviderStatus(effectiveConfig, processEnvironment, cwd).pipe(
++        Effect.flatMap(withUsageLimits),
+         Effect.map(stampIdentity),
+-        Effect.flatMap(withLatestUsage),
+         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+         Effect.provideService(FileSystem.FileSystem, fileSystem),
+         Effect.provideService(Path.Path, path),
+@@ -208,17 +219,47 @@ export const MuseDriver: ProviderDriver<
+       settings: effectiveConfig,
+       environment: processEnvironment,
+       modelCatalog,
++      usageAccountGeneration: Ref.get(usageAccount).pipe(
++        Effect.map((account) => account.generation),
++      ),
++      // Per-notification work stays within the adapter's notification handling.
++      onSubscriptionUsage: Effect.fnUntraced(function* (
++        usage: MuseSubscriptionUsage,
++        hostGeneration: number,
++      ) {
++        const account = yield* Ref.get(usageAccount);
++        // A host from before a logout or another login reports for an account
++        // that is gone, and signed out there is no account to report for.
++        if (hostGeneration !== account.generation || account.identity === null) return;
++        // Every session's host reports; an older report arriving late must not win.
++        const newer = yield* Ref.modify(latestUsage, (previous) =>
++          previous && previous.usage.observedAtMs >= usage.observedAtMs
++            ? [false, previous]
++            : [true, { usage, generation: hostGeneration }],
++        );
++        const { auth } = yield* snapshot.getSnapshot;
++        // The probe may have advanced the generation before publishing its new account.
++        const publishedIdentity = museUsageAccount(auth);
++        if (
++          !newer ||
++          auth.type === "apiKey" ||
++          auth.status === "unauthenticated" ||
++          (publishedIdentity !== undefined && publishedIdentity !== account.identity)
++        )
++          return;
++        const now = yield* DateTime.now;
++        const authLabel = museUsageAuth(auth, usage.tier).label;
++        yield* snapshot.applyUsageLimits({
++          windows: museUsageWindows(usage, DateTime.toEpochMillis(now)),
++          checkedAt: DateTime.formatIso(DateTime.makeUnsafe(usage.observedAtMs)),
++          // A report is the account's whole state, so a window that has reset
++          // since loses its old reset time instead of keeping it.
++          complete: true,
++          ...(authLabel !== undefined ? { authLabel } : {}),
++        });
++      }, usagePermit.withPermits(1)),
+       ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+       continuationRequests,
+-      onUsageLimits: (report) =>
+-        usagePermit.withPermits(1)(
+-          Effect.gen(function* () {
+-            const previous = yield* Ref.get(latestUsage);
+-            if (previous && Date.parse(report.checkedAt) < Date.parse(previous.checkedAt)) return;
+-            yield* Ref.set(latestUsage, report);
+-            yield* snapshot.applyUsageLimits({ ...report, complete: true });
+-          }),
+-        ),
+     });
+     const textGeneration = yield* makeMuseTextGeneration(effectiveConfig, {
+       environment: processEnvironment,
+diff --git a/packages/provider-muse/src/server/modelCatalog.test.ts b/packages/provider-muse/src/server/modelCatalog.test.ts
+index 277190c4d5b9..1eb78a1e5406 100644
+--- a/packages/provider-muse/src/server/modelCatalog.test.ts
++++ b/packages/provider-muse/src/server/modelCatalog.test.ts
+@@ -1,8 +1,144 @@
+ import { describe, expect, it } from "@effect/vitest";
++import { MuseSettings } from "../settings.ts";
++import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
++import * as Schema from "effect/Schema";
++import * as TestClock from "effect/testing/TestClock";
+ 
+-import { museModelCapabilities, resolveMuseReasoningEffort } from "./modelCatalog.ts";
++import type { MuseSdkHost } from "./sdk.ts";
++import {
++  museModelCapabilities,
++  probeMuseHost,
++  resolveMuseReasoningEffort,
++} from "./modelCatalog.ts";
++
++const settings = Schema.decodeSync(MuseSettings)({});
++const host = (
++  catalog: Record<string, unknown>,
++  account?: Record<string, unknown>,
++): MuseSdkHost => ({
++  connection: {
++    request: async (method: string) => (method === "account/read" && account ? account : catalog),
++    command: async () => ({}),
++    mintCommandId: () => "test",
++    onNotification: () => {},
++    onServerRequest: () => {},
++    onProtocolError: () => {},
++    closed: new Promise<void>(() => {}),
++  },
++  initializeResult: { grantedCapabilities: [] },
++  exited: new Promise(() => {}),
++  close: async () => {},
++});
++
++const row = (modelId: string, extra: Record<string, unknown> = {}) => ({
++  modelId,
++  displayLabel: modelId,
++  providerId: "meta",
++  profileId: "tbh",
++  isDefault: false,
++  contextLimit: 1_000_000,
++  ...extra,
++});
+ 
+ describe("Muse model catalog", () => {
++  it.effect("uses the labels, efforts and defaults that model/list sends", () =>
++    Effect.gen(function* () {
++      const { models, account } = yield* probeMuseHost(settings, {}, undefined, async () =>
++        host({
++          providerId: "meta",
++          profileId: "tbh",
++          source: "providerCatalog",
++          models: [
++            row("restful-walrus", {
++              displayLabel: " Restful Walrus ",
++              isDefault: true,
++              variants: ["minimal", "low", "high", "future-tier"],
++              reasoningEffortVariants: [{ tier: "low", description: "Quick" }],
++              defaultReasoningEffort: "high",
++            }),
++            row("older-host"),
++            row("unknown-efforts", { variants: "unknown" }),
++            row("foreign", { providerId: "another" }),
++          ],
++        }),
++      ).pipe(Effect.scoped);
++      expect(models.map(({ slug, name, isDefault }) => [slug, name, isDefault])).toEqual([
++        ["restful-walrus", "Restful Walrus", true],
++        ["older-host", "older-host", false],
++        ["unknown-efforts", "unknown-efforts", false],
++      ]);
++      expect(models[0]?.capabilities?.optionDescriptors).toEqual([
++        {
++          id: "reasoningEffort",
++          label: "Reasoning",
++          type: "select",
++          currentValue: "high",
++          options: [
++            { id: "minimal", label: "Minimal" },
++            { id: "low", label: "Low", description: "Quick" },
++            { id: "high", label: "High", isDefault: true },
++          ],
++        },
++      ]);
++      // Older hosts and "unknown" fall back to Muse's documented tiers.
++      expect(models[1]?.capabilities).toEqual(museModelCapabilities());
++      expect(models[2]?.capabilities).toEqual(museModelCapabilities());
++      // A host that does not answer account/read in the expected shape leaves the account unknown.
++      expect(account).toBeUndefined();
++    }),
++  );
++
++  it.effect("reads the signed-in account from the experimental account/read", () =>
++    Effect.gen(function* () {
++      const { account } = yield* probeMuseHost(settings, {}, undefined, async () =>
++        host(
++          { providerId: "meta", models: [row("muse-spark-1.3", { isDefault: true })] },
++          {
++            state: "accountLogin",
++            label: "person@example.com",
++            avatarUrl: "https://example.com/a.png",
++            credentialRequired: true,
++          },
++        ),
++      ).pipe(Effect.scoped);
++      expect(account).toEqual({
++        state: "accountLogin",
++        label: "person@example.com",
++        credentialRequired: true,
++      });
++    }),
++  );
++
++  it.effect("keeps the models when account/read never answers", () =>
++    Effect.gen(function* () {
++      const base = host({
++        providerId: "meta",
++        models: [row("muse-spark-1.3", { isDefault: true })],
++      });
++      let askedForAccount = () => {};
++      const accountRequested = new Promise<void>((resolve) => {
++        askedForAccount = resolve;
++      });
++      const probing = yield* probeMuseHost(settings, {}, undefined, async () => ({
++        ...base,
++        connection: {
++          ...base.connection,
++          request: (method: string) => {
++            if (method !== "account/read") return base.connection.request(method);
++            askedForAccount();
++            return new Promise<never>(() => {});
++          },
++        },
++      })).pipe(Effect.scoped, Effect.forkChild);
++      yield* Effect.promise(() => accountRequested);
++      yield* TestClock.adjust("2 seconds");
++      const { models, account } = yield* Fiber.join(probing);
++      expect(models.map(({ slug }) => slug)).toEqual(["muse-spark-1.3"]);
++      expect(account).toBeUndefined();
++    }),
++  );
++
+   it("normalizes saved and implicit efforts against the selected model before dispatch", () => {
+     const fallback = museModelCapabilities();
+     expect(resolveMuseReasoningEffort(fallback, undefined)).toBe("high");
+diff --git a/packages/provider-muse/src/server/modelCatalog.ts b/packages/provider-muse/src/server/modelCatalog.ts
+index a99deca5354d..e1348096b88e 100644
+--- a/packages/provider-muse/src/server/modelCatalog.ts
++++ b/packages/provider-muse/src/server/modelCatalog.ts
+@@ -4,7 +4,9 @@ import { ModelCapabilities, ServerProviderModel } from "@t3tools/contracts";
+ import { MuseSettings } from "../settings.ts";
+ import { createModelCapabilities, getProviderOptionDescriptors } from "@t3tools/shared/model";
+ import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
++import { MuseAccountState } from "./protocol.ts";
+ import {
+   createMuseSdkHost,
+   createMuseSdkHostEffect,
+@@ -50,6 +52,7 @@ const ModelCatalogEntry = Schema.Struct({
+ const decodeModelList = Schema.decodeUnknownEffect(
+   Schema.Struct({ providerId: Schema.String, models: Schema.Array(ModelCatalogEntry) }),
+ );
++const decodeAccountState = Schema.decodeUnknownEffect(MuseAccountState);
+ 
+ export function museModelCapabilities(
+   model?: Pick<
+@@ -102,7 +105,12 @@ class MuseCatalogError extends Schema.TaggedError<MuseCatalogError>()("MuseCatal
+   detail: Schema.String,
+ }) {}
+ 
+-export const discoverMuseModels = Effect.fn("discoverMuseModels")(function* (
++/**
++ * What a read-only host reports about this machine's Muse: the model catalog
++ * and, where the experimental `account/read` is served, the credential in
++ * effect. Neither starts a session or a model call.
++ */
++export const probeMuseHost = Effect.fn("probeMuseHost")(function* (
+   settings: MuseSettings,
+   environment: NodeJS.ProcessEnv | undefined,
+   cwd?: string,
+@@ -115,6 +123,7 @@ export const discoverMuseModels = Effect.fn("discoverMuseModels")(function* (
+         ...(environment ? { environment } : {}),
+         ...(cwd ? { cwd } : {}),
+         readOnly: true,
++        experimentalApi: true,
+         startupTimeoutMs: resolveMuseStartupTimeoutMs(environment),
+       },
+       createHost,
+@@ -131,7 +140,7 @@ export const discoverMuseModels = Effect.fn("discoverMuseModels")(function* (
+     return yield* new MuseCatalogError({ detail: "Muse returned a catalog for another provider." });
+   }
+   const seen = new Set<string>();
+-  return catalog.models.flatMap((model): ServerProviderModel[] => {
++  const models = catalog.models.flatMap((model): ServerProviderModel[] => {
+     if (model.providerId !== "meta" || seen.has(model.modelId)) return [];
+     seen.add(model.modelId);
+     const label = model.displayLabel.trim() || model.modelId;
+@@ -149,4 +158,13 @@ export const discoverMuseModels = Effect.fn("discoverMuseModels")(function* (
+       },
+     ];
+   });
++  // A host without the experimental surface leaves the account unknown, as before,
++  // and so does one that never answers: the models found above must not wait on it.
++  // The timeout ends the wait, not the request; the probe's host closes right after,
++  // which drops a late answer.
++  const account = yield* Effect.tryPromise({
++    try: () => host.connection.request("account/read", {}),
++    catch: (cause) => new MuseSdkError({ operation: "account/read", cause }),
++  }).pipe(Effect.flatMap(decodeAccountState), Effect.timeout(2_000), Effect.option);
++  return { models, account: Option.getOrUndefined(account) };
+ });
+diff --git a/packages/provider-muse/src/server/protocol.ts b/packages/provider-muse/src/server/protocol.ts
+index 87c9c922ef59..f4232ce71bf2 100644
+--- a/packages/provider-muse/src/server/protocol.ts
++++ b/packages/provider-muse/src/server/protocol.ts
+@@ -167,7 +167,10 @@ const DateMillis = Schema.Finite.check(
+   Schema.isGreaterThan(0),
+   Schema.isLessThanOrEqualTo(LATEST_DATE_MS),
+ );
+-/** Latest response subscription windows; verbatim Meta percentages may exceed 100. */
++/**
++ * `usage/changed` params: the Meta subscription windows the latest model
++ * response reported. Percentages are Meta's, verbatim, and may exceed 100.
++ */
+ export const MuseSubscriptionUsage = Schema.Struct({
+   observedAtMs: DateMillis,
+   tier: Schema.String,
+@@ -182,6 +185,13 @@ export const MuseSubscriptionUsage = Schema.Struct({
+   }),
+ });
+ export type MuseSubscriptionUsage = typeof MuseSubscriptionUsage.Type;
++/** Experimental `account/read` result: the credential lane in effect and, for a login, its account. */
++export const MuseAccountState = Schema.Struct({
++  state: Schema.String,
++  label: Schema.optional(Schema.String),
++  credentialRequired: Schema.optional(Schema.Boolean),
++});
++export type MuseAccountState = typeof MuseAccountState.Type;
+ /** `turn/retryScheduled` carries `reason`; `turn/modelRetryScheduled` carries the HTTP failure. */
+ export const MuseRetryScheduled = Schema.Struct({
+   turnId: NonEmptyString,
+diff --git a/packages/provider-muse/src/server/sdk.ts b/packages/provider-muse/src/server/sdk.ts
+index 6d6b4d5d5105..2a79e7f83596 100644
+--- a/packages/provider-muse/src/server/sdk.ts
++++ b/packages/provider-muse/src/server/sdk.ts
+@@ -58,6 +58,8 @@ export interface MuseSdkHostOptions {
+   readonly readOnly?: boolean;
+   /** Read-only generation needs session logging for turn/item notifications. */
+   readonly sessionLogging?: boolean;
++  /** Opts into MSP's experimental methods, such as `account/read`. */
++  readonly experimentalApi?: boolean;
+   readonly signal?: AbortSignal;
+   readonly startupTimeoutMs?: number;
+   readonly onProcessExit?: (exit: ProcessExit) => void;
+@@ -156,10 +158,14 @@ export function museServeArgs(
+   return args;
+ }
+ 
+-export function museInitializeParams(readOnly = false) {
++/** What T3 sends in MSP `initialize`; only full hosts ask for session MCP servers. */
++export function museInitializeParams(readOnly = false, experimentalApi = false) {
+   return {
+     clientInfo: { name: "t3_code", title: "T3 Code", version: "1" },
+-    capabilities: { requestedCapabilities: readOnly ? [] : ["sessionMcp"] },
++    capabilities: {
++      requestedCapabilities: readOnly ? [] : ["sessionMcp"],
++      ...(experimentalApi ? { experimentalApi: true } : {}),
++    },
+   };
+ }
+ 
+@@ -200,7 +206,7 @@ export async function createMuseSdkHost(
+   timer.unref();
+   try {
+     const host = await Promise.race([
+-      handshake.initialize(museInitializeParams(options.readOnly)),
++      handshake.initialize(museInitializeParams(options.readOnly, options.experimentalApi)),
+       interrupted,
+     ]);
+     if (host.initializeResult.schema?.version !== 1) {
+diff --git a/packages/provider-muse/src/server/status.test.ts b/packages/provider-muse/src/server/status.test.ts
+index a5e51cf9369f..24583290d50d 100644
+--- a/packages/provider-muse/src/server/status.test.ts
++++ b/packages/provider-muse/src/server/status.test.ts
+@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { expect, it } from "@effect/vitest";
+ import { MuseSettings } from "../settings.ts";
+ import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
++import * as TestClock from "effect/testing/TestClock";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Schema from "effect/Schema";
+ import { vi } from "vite-plus/test";
+@@ -9,14 +11,16 @@ import { vi } from "vite-plus/test";
+ import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
+ import type { MuseSdkHost } from "./sdk.ts";
+ import { COMPACT_SLASH_COMMAND } from "@t3tools/provider-core/server/snapshotProbe";
+-import { checkMuseProviderStatus } from "./status.ts";
++import { checkMuseProviderStatus, museAccountAuth } from "./status.ts";
+ 
+ const settings = Schema.decodeSync(MuseSettings);
+-const makeHost = (catalog: Record<string, unknown>) => {
++const makeHost = (catalog: Record<string, unknown>, account?: Record<string, unknown>) => {
+   const host: MuseSdkHost = {
+     initializeResult: { grantedCapabilities: [] },
+     connection: {
+-      request: vi.fn(async () => catalog),
++      request: vi.fn(async (method: string) =>
++        method === "account/read" && account ? account : catalog,
++      ),
+       command: vi.fn(async () => ({})),
+       mintCommandId: () => "test-command",
+       onNotification: () => {},
+@@ -119,6 +123,158 @@ it.layer(NodeServices.layer)("Muse status", (it) => {
+     }),
+   );
+ 
++  it.effect("keeps a slow catalog when the optional account probe never answers", () =>
++    Effect.gen(function* () {
++      const binaryPath = yield* fakeCli();
++      let markStarted = () => {};
++      let markCatalogRequested = () => {};
++      let markAccountRequested = () => {};
++      const started = new Promise<void>((resolve) => {
++        markStarted = resolve;
++      });
++      const catalogRequested = new Promise<void>((resolve) => {
++        markCatalogRequested = resolve;
++      });
++      const accountRequested = new Promise<void>((resolve) => {
++        markAccountRequested = resolve;
++      });
++      let finishStartup = () => {};
++      let finishCatalog = (_value: typeof metaCatalog) => {};
++      const host = makeHost(metaCatalog);
++      host.connection.request = vi.fn((method: string) => {
++        if (method === "account/read") {
++          markAccountRequested();
++          return new Promise<never>(() => {});
++        }
++        markCatalogRequested();
++        return new Promise<typeof metaCatalog>((resolve) => {
++          finishCatalog = resolve;
++        });
++      });
++      const probing = yield* checkMuseProviderStatus(
++        settings({ enabled: true, binaryPath }),
++        undefined,
++        undefined,
++        async () => {
++          markStarted();
++          await new Promise<void>((resolve) => {
++            finishStartup = resolve;
++          });
++          return host;
++        },
++      ).pipe(Effect.forkChild);
++      yield* Effect.promise(() => started);
++      yield* TestClock.adjust("7 seconds");
++      finishStartup();
++      yield* Effect.promise(() => catalogRequested);
++      yield* TestClock.adjust("3500 millis");
++      finishCatalog(metaCatalog);
++      yield* Effect.promise(() => accountRequested);
++      yield* TestClock.adjust("2 seconds");
++      const snapshot = yield* Fiber.join(probing);
++      expect(snapshot.status).toBe("ready");
++      expect(snapshot.auth).toEqual({ status: "unknown" });
++      expect(snapshot.models.map((model) => model.slug)).toEqual(["muse-wonder-1.0"]);
++      expect(host.close).toHaveBeenCalledOnce();
++    }),
++  );
++
++  it.effect("closes the host after malformed metadata and reports unavailable", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const binaryPath = yield* fakeCli();
++        const host = makeHost({ providerId: "meta", models: [{ modelId: 1 }] });
++        const snapshot = yield* checkMuseProviderStatus(
++          settings({ enabled: true, binaryPath }),
++          undefined,
++          undefined,
++          async () => host,
++        );
++        expect(snapshot.status).toBe("error");
++        expect(snapshot.auth.status).toBe("unknown");
++        expect(snapshot.models).toEqual([]);
++        expect(host.close).toHaveBeenCalledOnce();
++      }),
++    ),
++  );
++
++  it.effect("names the signed-in account from the experimental account/read", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const binaryPath = yield* fakeCli();
++        const host = makeHost(metaCatalog, {
++          state: "accountLogin",
++          label: "person@example.com",
++          credentialRequired: true,
++        });
++        const snapshot = yield* checkMuseProviderStatus(
++          settings({ enabled: true, binaryPath }),
++          undefined,
++          undefined,
++          async () => host,
++        );
++        expect(snapshot.status).toBe("ready");
++        expect(snapshot.auth).toEqual({
++          status: "authenticated",
++          type: "accountLogin",
++          email: "person@example.com",
++        });
++        expect(host.connection.request).toHaveBeenCalledWith("account/read", {});
++      }),
++    ),
++  );
++
++  it.effect("reports a signed-out Muse instead of waiting for the first turn to fail", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const binaryPath = yield* fakeCli();
++        const snapshot = yield* checkMuseProviderStatus(
++          settings({ enabled: true, binaryPath }),
++          undefined,
++          undefined,
++          async () => makeHost(metaCatalog, { state: "loggedOut", credentialRequired: true }),
++        );
++        expect(snapshot.status).toBe("error");
++        expect(snapshot.auth).toEqual({ status: "unauthenticated" });
++        expect(snapshot.message).toContain("muse login");
++        expect(snapshot.models.map((model) => model.slug)).toEqual(["muse-wonder-1.0"]);
++      }),
++    ),
++  );
++
++  it.effect("maps every account/read credential lane", () =>
++    Effect.sync(() => {
++      expect(museAccountAuth({ state: "apiKey" })).toEqual({
++        status: "authenticated",
++        type: "apiKey",
++        label: "API key",
++      });
++      expect(museAccountAuth({ state: "envKey", label: "META_API_KEY" })).toMatchObject({
++        type: "apiKey",
++      });
++      expect(museAccountAuth({ state: "accountLogin", label: "Team login" })).toEqual({
++        status: "authenticated",
++        type: "accountLogin",
++        label: "Team login",
++      });
++      expect(museAccountAuth({ state: "accountLogin", label: "Team @ Meta" })).toEqual({
++        status: "authenticated",
++        type: "accountLogin",
++        label: "Team @ Meta",
++      });
++      expect(museAccountAuth({ state: "accountLogin", label: " dev@example.com " })).toEqual({
++        status: "authenticated",
++        type: "accountLogin",
++        email: "dev@example.com",
++      });
++      // A keyless endpoint needs no login, and a lane this version does not know stays unknown.
++      expect(museAccountAuth({ state: "loggedOut", credentialRequired: false })).toEqual({
++        status: "unknown",
++      });
++      expect(museAccountAuth({ state: "somethingNew" })).toEqual({ status: "unknown" });
++      expect(museAccountAuth(undefined)).toEqual({ status: "unknown" });
++    }),
++  );
+   it.effect("keeps an empty discovered catalog empty instead of advertising a fallback model", () =>
+     Effect.gen(function* () {
+       const binaryPath = yield* fakeCli();
+diff --git a/packages/provider-muse/src/server/status.ts b/packages/provider-muse/src/server/status.ts
+index 344ae1d1a684..ed26762cce19 100644
+--- a/packages/provider-muse/src/server/status.ts
++++ b/packages/provider-muse/src/server/status.ts
+@@ -1,5 +1,5 @@
++import { type ServerProvider, ServerProviderModel } from "@t3tools/contracts";
+ import { resolveProviderProbeTimeoutMs } from "@t3tools/provider-core/server/snapshotProbe";
+-import { ServerProviderModel } from "@t3tools/contracts";
+ import { MuseSettings } from "../settings.ts";
+ import { resolveSpawnCommand } from "@t3tools/shared/shell";
+ import * as DateTime from "effect/DateTime";
+@@ -11,10 +11,11 @@ import * as ChildProcess from "effect/process/ChildProcess";
+ import { createMuseSdkHost, makeMuseEnvironment } from "./sdk.ts";
+ import { parseMuseVersion } from "./maintenance.ts";
+ import {
+-  discoverMuseModels,
+   museModelCapabilities,
++  probeMuseHost,
+   resolveMuseStartupTimeoutMs,
+ } from "./modelCatalog.ts";
++import type { MuseAccountState } from "./protocol.ts";
+ import {
+   buildServerProvider,
+   COMPACT_SLASH_COMMAND,
+@@ -36,6 +37,36 @@ const MUSE_PRESENTATION = {
+ } as const;
+ 
+ const FALLBACK_CAPABILITIES = museModelCapabilities();
++// A login usually names its account by email. A display name such as
++// "Team @ Meta" stays a label so Settings never shows it as an address.
++const EMAIL_ADDRESS = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
++
++/**
++ * The credential `account/read` reports. A login names its account, which is
++ * how Limits counts one Meta subscription once across environments.
++ * States this version does not know stay `unknown`, as without the method.
++ */
++export function museAccountAuth(account: MuseAccountState | undefined): ServerProvider["auth"] {
++  const label = account?.label?.trim();
++  switch (account?.state) {
++    case "accountLogin":
++      return {
++        status: "authenticated",
++        type: "accountLogin",
++        ...(label ? (EMAIL_ADDRESS.test(label) ? { email: label } : { label }) : {}),
++      };
++    case "apiKey":
++    case "envKey":
++      return { status: "authenticated", type: "apiKey", label: "API key" };
++    case "loggedOut":
++      // A keyless endpoint needs no login, and nothing here can vouch for it.
++      return account.credentialRequired === false
++        ? { status: "unknown" }
++        : { status: "unauthenticated" };
++    default:
++      return { status: "unknown" };
++  }
++}
+ 
+ export const makePendingMuseProvider = Effect.fn("makePendingMuseProvider")(function* (
+   settings: MuseSettings,
+@@ -132,13 +163,13 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
+     });
+   }
+ 
+-  const catalog = yield* discoverMuseModels(settings, museEnvironment, cwd, createHost).pipe(
++  const probe = yield* probeMuseHost(settings, museEnvironment, cwd, createHost).pipe(
+     Effect.scoped,
+-    // Startup shares the override, so the catalog keeps its 4 seconds on top of it.
+-    Effect.timeoutOption(resolveMuseStartupTimeoutMs(museEnvironment) + 4_000),
++    // Reserve the catalog's four seconds and the optional account probe's two seconds.
++    Effect.timeoutOption(resolveMuseStartupTimeoutMs(museEnvironment) + 6_000),
+     Effect.result,
+   );
+-  if (Result.isFailure(catalog) || Option.isNone(catalog.success)) {
++  if (Result.isFailure(probe) || Option.isNone(probe.success)) {
+     return snapshot({
+       installed: true,
+       version,
+@@ -148,13 +179,27 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
+         "Muse Code SDK could not read the model catalog. Check your Muse installation and run `muse login` on this T3 server host.",
+     });
+   }
+-  const models = catalog.success.value;
+-  // MSP has no auth signal and serves cached models while logged out; failures surface on first turn.
++  const { models, account } = probe.success.value;
++  // model/list answers from Muse's cache even when logged out, so the login comes from
++  // the experimental account/read. Without it, auth failures surface on the first turn.
++  const auth = museAccountAuth(account);
++  if (auth.status === "unauthenticated") {
++    return snapshot(
++      {
++        installed: true,
++        version,
++        status: "error",
++        auth,
++        message: "Muse Code is not signed in. Run `muse login` on this T3 server host.",
++      },
++      models,
++    );
++  }
+   return snapshot(
+     {
+       installed: true,
+       version,
+-      auth: { status: "unknown" },
++      auth,
+       ...(models.length > 0
+         ? { status: "ready" }
+         : {
+diff --git a/packages/provider-muse/src/server/usageLimits.test.ts b/packages/provider-muse/src/server/usageLimits.test.ts
+index dddea9e6ac74..2e808d33c3cd 100644
+--- a/packages/provider-muse/src/server/usageLimits.test.ts
++++ b/packages/provider-muse/src/server/usageLimits.test.ts
+@@ -3,8 +3,13 @@ import { describe, expect, it } from "@effect/vitest";
+ import type { MuseSubscriptionUsage } from "./protocol.ts";
+ import {
+   isMuseUsageLimitFailure,
++  museStatusUsageLimits,
++  museUsageAccount,
++  museUsageAuth,
+   museUsageLimitResetAt,
+-  museUsageToLimits,
++  museUsageLimits,
++  museUsageWindows,
++  nextMuseUsageAccount,
+ } from "./usageLimits.ts";
+ 
+ const usage = {
+@@ -59,30 +64,136 @@ describe("Muse usage limit failures", () => {
+   });
+ });
+ 
+-describe("Muse account usage", () => {
+-  it("reports the session and weekly windows, capped at 100, with the tier as plan", () => {
+-    expect(museUsageToLimits({ ...usage, window: { ...usage.window, usedPercent: 103 } })).toEqual({
+-      checkedAt: "2026-10-08T08:22:42.610Z",
+-      authLabel: "tier-1",
+-      windows: [
+-        {
+-          id: "session",
+-          kind: "session",
+-          label: "Session",
+-          usedPercent: 100,
+-          resetsAt: "2026-10-08T13:19:17.000Z",
+-          windowDurationMins: 300,
+-        },
+-        {
+-          id: "weekly",
+-          kind: "weekly",
+-          label: "Weekly",
+-          usedPercent: 5,
+-          resetsAt: "2026-10-12T00:00:00.000Z",
+-          windowDurationMins: 10080,
+-        },
+-      ],
++// What Meta reported after a reply on 2026-10-08, as Muse forwards it.
++const observation = {
++  observedAtMs: 1791447762610,
++  window: { usedPercent: 0, windowDurationMins: 300, resetsAtMs: 1791465557000 },
++  weekly: { usedPercent: 5, resetsAtMs: 1791763200000 },
++};
++const reported = observation.observedAtMs;
++
++describe("Muse usage limits", () => {
++  it("maps Meta's window and week onto session and weekly rows", () => {
++    expect(museUsageWindows(observation, reported)).toEqual([
++      {
++        id: "window",
++        kind: "session",
++        label: "Session",
++        windowDurationMins: 300,
++        usedPercent: 0,
++        resetsAt: "2026-10-08T13:19:17.000Z",
++      },
++      {
++        id: "weekly",
++        kind: "weekly",
++        label: "Weekly",
++        windowDurationMins: 10080,
++        usedPercent: 5,
++        resetsAt: "2026-10-12T00:00:00.000Z",
++      },
++    ]);
++    // Dated by the report, so the freshest report wins across environments.
++    expect(museUsageLimits(observation, reported).checkedAt).toBe("2026-10-08T08:22:42.610Z");
++  });
++
++  it("caps over-quota percentages and starts a reset window over empty", () => {
++    const windows = museUsageWindows(
++      {
++        ...observation,
++        window: { ...observation.window, usedPercent: 104 },
++        weekly: { ...observation.weekly, usedPercent: 101 },
++      },
++      observation.window.resetsAtMs + 60_000,
++    );
++    // The session window has reset since the report; Meta opens the next one on use.
++    expect(windows[0]).toEqual({
++      id: "window",
++      kind: "session",
++      label: "Session",
++      windowDurationMins: 300,
++      usedPercent: 0,
++    });
++    expect(windows[1]).toMatchObject({ id: "weekly", usedPercent: 100 });
++  });
++
++  it("publishes a login's report, waits for one, and shows none for an API key", () => {
++    const login = {
++      status: "authenticated",
++      type: "accountLogin",
++      email: "a@example.com",
++    } as const;
++    const status = (
++      auth: Parameters<typeof museStatusUsageLimits>[0]["auth"],
++      withReport: boolean,
++      enabled = true,
++    ) =>
++      museStatusUsageLimits({
++        auth,
++        enabled,
++        observation: withReport ? observation : undefined,
++        nowMs: reported,
++      });
++
++    expect(status(login, true)).toEqual(museUsageLimits(observation, reported));
++    expect(status(login, false)?.unavailable).toEqual({
++      reason: "probeFailed",
++      message: "Muse reports usage limits with its next reply.",
++    });
++    // An API key names no account, so its reports could not be merged across environments.
++    const apiKey = { status: "authenticated", type: "apiKey", label: "API key" } as const;
++    expect(status(apiKey, true)?.unavailable?.reason).toBe("unsupported");
++    // Without account/read the lane is unknown: show what Muse reports, but promise nothing.
++    expect(status({ status: "unknown" }, true)).toEqual(museUsageLimits(observation, reported));
++    expect(status({ status: "unknown" }, false)).toBeUndefined();
++    expect(status(login, false, false)).toBeUndefined();
++    // Signed out, the last report has no account to show under.
++    expect(status({ status: "unauthenticated" }, true)).toBeUndefined();
++    // Just after another account signs in, the old report is gone but its windows are still
++    // published; no usage clears them, where "waiting for a report" would keep them.
++    expect(
++      museStatusUsageLimits({
++        auth: { ...login, email: "b@example.com" },
++        enabled: true,
++        observation: undefined,
++        dropped: true,
++        nowMs: reported,
++      }),
++    ).toBeUndefined();
++  });
++
++  it("starts a new account generation on a logout or another login", () => {
++    const login = {
++      status: "authenticated",
++      type: "accountLogin",
++      email: "a@example.com",
++    } as const;
++    const apiKey = { status: "authenticated", type: "apiKey", label: "API key" } as const;
++    // The first login a check names is the one the hosts so far started under.
++    const named = nextMuseUsageAccount({ generation: 0, identity: undefined }, login);
++    expect(named).toEqual({ generation: 0, identity: "a@example.com" });
++    expect(nextMuseUsageAccount(named, login)).toBe(named);
++    // Nothing names the login without account/read, and an API key names no account.
++    expect(nextMuseUsageAccount(named, { status: "unknown" })).toBe(named);
++    const keyAccount = nextMuseUsageAccount(named, apiKey);
++    expect(keyAccount).toEqual({ generation: 1, identity: null });
++    expect(nextMuseUsageAccount(keyAccount, login)).toEqual({
++      generation: 2,
++      identity: "a@example.com",
++    });
++    expect(museUsageAccount(apiKey)).toBeUndefined();
++    expect(museUsageAuth(login, "tier-1")).toEqual({ ...login, label: "tier-1" });
++    expect(museUsageAuth({ ...login, label: "tier-1" }, " ").label).toBeUndefined();
++    const labelOnly = { status: "authenticated", type: "accountLogin", label: "Team A" } as const;
++    expect(museUsageAuth(labelOnly, "tier-1")).toBe(labelOnly);
++    const other = nextMuseUsageAccount(named, { ...login, email: "b@example.com" });
++    expect(other).toEqual({ generation: 1, identity: "b@example.com" });
++    const signedOut = nextMuseUsageAccount(other, { status: "unauthenticated" });
++    expect(signedOut).toEqual({ generation: 2, identity: null });
++    // Signing in again, even as the same account, starts another: a host from before the
++    // logout may hold either login.
++    expect(nextMuseUsageAccount(signedOut, { ...login, email: "b@example.com" })).toEqual({
++      generation: 3,
++      identity: "b@example.com",
+     });
+-    expect(museUsageToLimits({ ...usage, tier: " " })).not.toHaveProperty("authLabel");
+   });
+ });
+diff --git a/packages/provider-muse/src/server/usageLimits.ts b/packages/provider-muse/src/server/usageLimits.ts
+index be981ebc009a..881c5773909d 100644
+--- a/packages/provider-muse/src/server/usageLimits.ts
++++ b/packages/provider-muse/src/server/usageLimits.ts
+@@ -1,39 +1,27 @@
++/**
++ * Muse Code's subscription usage limits. Meta reports the account's windows
++ * with every model response; the last report is re-derived against the clock.
++ */
++import type {
++  ServerProviderAuth,
++  ServerProviderUsageLimits,
++  ServerProviderUsageWindow,
++} from "@t3tools/contracts";
++import {
++  clampPercent,
++  makeUnavailableUsageLimits,
++  makeUsageLimits,
++} from "@t3tools/provider-core/server/usageLimits";
+ import * as DateTime from "effect/DateTime";
+-import { clampPercent } from "@t3tools/provider-core/server/usageLimits";
+-import type { ProviderUsageLimitsReport } from "@t3tools/provider-core/server/snapshot";
+ 
+ import { LATEST_DATE_MS, type MuseSubscriptionUsage } from "./protocol.ts";
+ 
+-const isoMillis = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+-
+-/** Muse's account-wide report as Limits windows, with its tier as the plan. */
+-export function museUsageToLimits(usage: MuseSubscriptionUsage): ProviderUsageLimitsReport {
+-  const tier = usage.tier.trim();
+-  return {
+-    checkedAt: isoMillis(usage.observedAtMs),
+-    windows: [
+-      {
+-        id: "session",
+-        kind: "session",
+-        label: "Session",
+-        usedPercent: clampPercent(usage.window.usedPercent),
+-        resetsAt: isoMillis(usage.window.resetsAtMs),
+-        windowDurationMins: usage.window.windowDurationMins,
+-      },
+-      {
+-        id: "weekly",
+-        kind: "weekly",
+-        label: "Weekly",
+-        usedPercent: clampPercent(usage.weekly.usedPercent),
+-        resetsAt: isoMillis(usage.weekly.resetsAtMs),
+-        windowDurationMins: 7 * 24 * 60,
+-      },
+-    ],
+-    ...(tier ? { authLabel: tier } : {}),
+-  };
+-}
+-
+-/** Credential proxies may omit error.quota from 429 refusals; inspect text too. */
++/**
++ * Muse surfaces Meta's quota refusal as `API error 429: Subscription quota
++ * exhausted. Your usage window resets at 2026-10-13T10:45:52Z.`, at times
++ * wrapped by a credential proxy. Muse can also type the stop as `error.quota`,
++ * but a relayed refusal arrives untyped, so the text still counts.
++ */
+ export function isMuseUsageLimitFailure(message: string | undefined): boolean {
+   return message !== undefined && /\b429\b/.test(message) && /quota|usage limit/i.test(message);
+ }
+@@ -41,7 +29,11 @@ export function isMuseUsageLimitFailure(message: string | undefined): boolean {
+ const NAMED_RESET =
+   /\bresets at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))/i;
+ 
+-/** Resume only after all exhausted windows reset; use the latest future reset from quota, refusal, or usage. */
++/**
++ * When a stopped turn can run again: every exhausted window must reset first.
++ * The resets come from the typed quota, the time the refusal names, and the
++ * used-up windows of the last report before it; the latest one still ahead wins.
++ */
+ export function museUsageLimitResetAt(
+   usage: MuseSubscriptionUsage | undefined,
+   nowMs: number,
+@@ -61,5 +53,129 @@ export function museUsageLimitResetAt(
+     (ms): ms is number =>
+       ms !== undefined && Number.isFinite(ms) && ms > nowMs && ms <= LATEST_DATE_MS,
+   );
+-  return resets.length > 0 ? isoMillis(Math.max(...resets)) : null;
++  return resets.length > 0 ? isoFromMillis(Math.max(...resets)) : null;
++}
++
++const WEEK_MINS = 7 * 24 * 60;
++
++type MuseUsageObservation = Pick<MuseSubscriptionUsage, "observedAtMs" | "window" | "weekly">;
++
++const isoFromMillis = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
++
++function makeWindow(
++  id: "window" | "weekly",
++  windowDurationMins: number,
++  usedPercent: number,
++  resetsAtMs: number,
++  nowMs: number,
++): ServerProviderUsageWindow {
++  const kind = windowDurationMins >= WEEK_MINS ? "weekly" : "session";
++  // Meta opens the next window with the account's next request, so a window
++  // that has reset since the report is empty and its new reset is unknown.
++  const current = resetsAtMs > nowMs;
++  return {
++    id,
++    kind,
++    label: kind === "weekly" ? "Weekly" : "Session",
++    windowDurationMins: Math.round(windowDurationMins),
++    usedPercent: current ? clampPercent(usedPercent) : 0,
++    ...(current ? { resetsAt: isoFromMillis(resetsAtMs) } : {}),
++  };
++}
++
++export function museUsageWindows(
++  observation: MuseUsageObservation,
++  nowMs: number,
++): ReadonlyArray<ServerProviderUsageWindow> {
++  const { window, weekly } = observation;
++  return [
++    makeWindow("window", window.windowDurationMins, window.usedPercent, window.resetsAtMs, nowMs),
++    makeWindow("weekly", WEEK_MINS, weekly.usedPercent, weekly.resetsAtMs, nowMs),
++  ];
++}
++
++/** Limits as of `nowMs`, dated when Meta reported them so the freshest report wins across environments. */
++export function museUsageLimits(
++  observation: MuseUsageObservation,
++  nowMs: number,
++): ServerProviderUsageLimits {
++  return makeUsageLimits({
++    checkedAt: isoFromMillis(observation.observedAtMs),
++    windows: museUsageWindows(observation, nowMs),
++  });
++}
++
++/** The login a status check names: its address or label. */
++export function museUsageAccount(auth: ServerProviderAuth): string | undefined {
++  return auth.type === "accountLogin" ? (auth.email ?? auth.label) : undefined;
++}
++
++/**
++ * Which login an instance's usage reports belong to. Reports name no account,
++ * so each one counts for the generation its host started under, and a logout
++ * or another login starts a new generation: a report from an older host is
++ * never shown under the account that replaced it.
++ */
++export interface MuseUsageAccount {
++  readonly generation: number;
++  /** The login last named, `null` once signed out, `undefined` before any status check names one. */
++  readonly identity: string | null | undefined;
++}
++
++export function nextMuseUsageAccount(
++  account: MuseUsageAccount,
++  auth: ServerProviderAuth,
++): MuseUsageAccount {
++  const identity =
++    auth.status === "unauthenticated" || auth.type === "apiKey" ? null : museUsageAccount(auth);
++  if (identity === undefined || identity === account.identity) return account;
++  // The first login a check names is the one the hosts so far started under.
++  if (account.identity === undefined) return { ...account, identity };
++  return { generation: account.generation + 1, identity };
++}
++
++/**
++ * What a status check publishes for an instance. An API key names no Meta
++ * account, so its reports cannot be told apart across environments and none
++ * are shown. Otherwise the newest report stands, or a login says when to
++ * expect one.
++ */
++export function museStatusUsageLimits(input: {
++  readonly auth: ServerProviderAuth;
++  readonly enabled: boolean;
++  readonly observation: MuseUsageObservation | undefined;
++  /** This check dropped the kept report: a logout or another login started a new generation. */
++  readonly dropped?: boolean;
++  readonly nowMs: number;
++}): ServerProviderUsageLimits | undefined {
++  const checkedAt = isoFromMillis(input.nowMs);
++  if (input.auth.type === "apiKey") {
++    return makeUnavailableUsageLimits({
++      checkedAt,
++      reason: "unsupported",
++      message: "Muse uses an API key here, which names no Meta account to report limits for.",
++    });
++  }
++  // Signed out, there is no account to report on.
++  if (input.auth.status === "unauthenticated") return undefined;
++  if (input.observation) return museUsageLimits(input.observation, input.nowMs);
++  // The dropped report's windows are still published. "Waiting for a report" would
++  // keep them, as a failed probe keeps the last good bars, so publish none to clear them.
++  if (input.dropped) return undefined;
++  if (!input.enabled || input.auth.type !== "accountLogin") return undefined;
++  return makeUnavailableUsageLimits({
++    checkedAt,
++    reason: "probeFailed",
++    message: "Muse reports usage limits with its next reply.",
++  });
++}
++
++// Account labels are identity when Muse supplies no email; a tier must not replace them.
++export function museUsageAuth(
++  auth: ServerProviderAuth,
++  tier: string | undefined,
++): ServerProviderAuth {
++  if (auth.type === "accountLogin" && !auth.email) return auth;
++  const label = tier?.trim();
++  return { ...auth, label: label || undefined };
+ }
+diff --git a/packages/provider-muse/src/server/usageProbe.test.ts b/packages/provider-muse/src/server/usageProbe.test.ts
+new file mode 100644
+index 000000000000..ec11432b3ae0
+--- /dev/null
++++ b/packages/provider-muse/src/server/usageProbe.test.ts
+@@ -0,0 +1,385 @@
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { expect, it } from "@effect/vitest";
++import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
++import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Fiber from "effect/Fiber";
++import * as Schema from "effect/Schema";
++import * as TestClock from "effect/testing/TestClock";
++import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
++import { MuseSettings } from "../settings.ts";
++import { refreshMuseUsage as refreshState, type MuseUsageReport } from "./usageProbe.ts";
++import type { MuseUsageAccount } from "./usageLimits.ts";
++import * as Ref from "effect/Ref";
++import * as Semaphore from "effect/Semaphore";
++
++const settings = Schema.decodeEffect(MuseSettings);
++
++const observedAtMs = 1793073851130;
++const allowance = {
++  asOfMs: observedAtMs,
++  source: "mint",
++  tier: "Muse Code High Usage",
++  window: { usedPercent: 1, resetsAtMs: 1793091678000 },
++  weekly: { usedPercent: 33, resetsAtMs: 1793577600000 },
++};
++const response = { schemaVersion: 1, allowance, reason: null, hint: null };
++const provider = {
++  enabled: true,
++  installed: true,
++  version: "1.4.13",
++  status: "ready",
++  auth: { status: "authenticated", type: "accountLogin", email: "a@example.com" },
++  checkedAt: "2026-10-27T04:04:11.130Z",
++  models: [],
++  skills: [],
++  slashCommands: [],
++} satisfies ServerProviderDraft;
++const account = { generation: 0, identity: "a@example.com" };
++const report = {
++  generation: 0,
++  usage: {
++    observedAtMs,
++    tier: allowance.tier,
++    window: { ...allowance.window, windowDurationMins: 300 },
++    weekly: allowance.weekly,
++  },
++};
++
++const fixture = (source = `process.stdout.write(${JSON.stringify(JSON.stringify(response))});`) =>
++  Effect.gen(function* () {
++    const fs = yield* FileSystem.FileSystem;
++    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "muse-usage-probe-" });
++    const binaryPath = writeFakeCli({
++      directory,
++      name: "muse",
++      source: `
++        if (JSON.stringify(process.argv.slice(2)) !== '["usage","--json"]') process.exit(12);
++        ${source}
++      `,
++    });
++    return {
++      settings: yield* settings({ enabled: true, binaryPath }),
++      environment: {
++        ...process.env,
++        MUSE_NO_AUTO_UPDATE: "1",
++        T3_USAGE_TEST: "configured",
++        T3_USAGE_CWD: yield* fs.realPath(directory),
++      },
++      cwd: directory,
++      provider,
++      account,
++      latestUsage: undefined,
++    };
++  });
++
++const refreshMuseUsage = Effect.fn("test.refreshMuseUsage")(function* (
++  input: Omit<Parameters<typeof refreshState>[0], "state"> & {
++    readonly account: MuseUsageAccount;
++    readonly latestUsage: MuseUsageReport | undefined;
++  },
++) {
++  return yield* refreshState({
++    ...input,
++    state: {
++      account: yield* Ref.make(input.account),
++      latestUsage: yield* Ref.make(input.latestUsage),
++      permit: yield* Semaphore.make(1),
++    },
++  });
++});
++
++it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
++  it.effect("fills limits on the first status refresh without a model turn", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture(`
++        if (process.env.T3_USAGE_TEST !== 'configured' || process.cwd() !== process.env.T3_USAGE_CWD) process.exit(13);
++        process.stdout.write(${JSON.stringify(JSON.stringify(response))});
++      `);
++        const refreshed = yield* refreshMuseUsage(input);
++        expect(refreshed.latestUsage).toEqual(report);
++        expect(refreshed.provider.auth.label).toBe(allowance.tier);
++        expect(refreshed.provider.usageLimits).toEqual({
++          checkedAt: "2026-10-27T04:04:11.130Z",
++          windows: [
++            {
++              id: "window",
++              kind: "session",
++              label: "Session",
++              windowDurationMins: 300,
++              usedPercent: 1,
++              resetsAt: "2026-10-27T09:01:18.000Z",
++            },
++            {
++              id: "weekly",
++              kind: "weekly",
++              label: "Weekly",
++              windowDurationMins: 10080,
++              usedPercent: 33,
++              resetsAt: "2026-11-02T00:00:00.000Z",
++            },
++          ],
++        });
++        expect(refreshed.provider.status).toBe("ready");
++      }),
++    ),
++  );
++
++  it.effect.each([
++    [
++      "an empty allowance",
++      'process.stdout.write(JSON.stringify({schemaVersion:1,allowance:null,reason:"server_sent_no_usage"}));',
++    ],
++    [
++      "an older CLI without the command",
++      'process.stderr.write("unknown command usage"); process.exit(2);',
++    ],
++    ["invalid JSON", 'process.stdout.write("invalid");'],
++    [
++      "an unknown schema version",
++      `process.stdout.write(${JSON.stringify(JSON.stringify({ ...response, schemaVersion: 2 }))});`,
++    ],
++    [
++      "an invalid percentage",
++      `process.stdout.write(${JSON.stringify(JSON.stringify({ ...response, allowance: { ...allowance, window: { ...allowance.window, usedPercent: -1 } } }))});`,
++    ],
++  ] as const)("keeps the latest same-account report after %s", ([, source]) =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture(source);
++        const refreshed = yield* refreshMuseUsage({ ...input, latestUsage: report });
++        expect(refreshed.latestUsage).toBe(report);
++        expect(refreshed.provider.usageLimits?.unavailable).toBeUndefined();
++        expect(refreshed.provider.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([1, 33]);
++        const first = yield* refreshMuseUsage(input);
++        expect(first.latestUsage).toBeUndefined();
++        if (source.includes("allowance:null")) {
++          expect(first.provider.usageLimits?.unavailable?.message).toContain("next reply");
++          expect(first.provider.status).toBe("ready");
++        } else {
++          expect(refreshed.provider.status).toBe("warning");
++          expect(refreshed.provider.message).toContain("Muse usage refresh");
++          expect(first.provider.usageLimits?.unavailable?.message).toBe(first.provider.message);
++        }
++      }),
++    ),
++  );
++
++  it.effect("keeps a newer notification instead of replacing it with an older CLI read", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture();
++        const newer = {
++          ...report,
++          usage: {
++            ...report.usage,
++            observedAtMs: observedAtMs + 1,
++            window: { ...report.usage.window, usedPercent: 10 },
++          },
++        };
++        const refreshed = yield* refreshMuseUsage({ ...input, latestUsage: newer });
++        expect(refreshed.latestUsage).toBe(newer);
++        expect(refreshed.provider.usageLimits?.windows[0]?.usedPercent).toBe(10);
++      }),
++    ),
++  );
++
++  it.effect("drops the old account's report when a new account has no allowance", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture(
++          "process.stdout.write(JSON.stringify({schemaVersion:1,allowance:null}));",
++        );
++        const refreshed = yield* refreshMuseUsage({
++          ...input,
++          latestUsage: report,
++          provider: { ...provider, auth: { ...provider.auth, email: "b@example.com" } },
++        });
++        expect(refreshed.account).toEqual({ generation: 1, identity: "b@example.com" });
++        expect(refreshed.latestUsage).toBeUndefined();
++        expect(refreshed.provider.usageLimits).toBeUndefined();
++      }),
++    ),
++  );
++
++  it.effect("attributes a new account's CLI read to its new generation", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture();
++        const refreshed = yield* refreshMuseUsage({
++          ...input,
++          latestUsage: report,
++          provider: { ...provider, auth: { ...provider.auth, email: "b@example.com" } },
++        });
++        expect(refreshed.latestUsage).toEqual({ ...report, generation: 1 });
++        expect(refreshed.account.identity).toBe("b@example.com");
++      }),
++    ),
++  );
++
++  it.effect(
++    "never runs the command for API keys, signed-out accounts, disabled or failed providers",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const input = yield* fixture();
++          const fs = yield* FileSystem.FileSystem;
++          const marker = `${input.cwd}/spawned`;
++          const binaryPath = writeFakeCli({
++            directory: input.cwd,
++            name: "forbidden",
++            source: `import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)},'spawned');`,
++          });
++          const cases: ServerProviderDraft[] = [
++            { ...provider, auth: { status: "authenticated", type: "apiKey" } },
++            { ...provider, auth: { status: "unauthenticated" } },
++            { ...provider, auth: { status: "unknown" } },
++            { ...provider, enabled: false },
++            { ...provider, status: "error" },
++            { ...provider, version: "1.4.12-R6909.1" },
++            { ...provider, version: null },
++          ];
++          for (const candidate of cases) {
++            const refreshed = yield* refreshMuseUsage({
++              ...input,
++              settings: { ...input.settings, binaryPath },
++              provider: candidate,
++              latestUsage: report,
++            });
++            expect(refreshed.provider.auth).toEqual(
++              refreshed.latestUsage ? { ...candidate.auth, label: allowance.tier } : candidate.auth,
++            );
++            if (candidate.auth.status === "unauthenticated" || candidate.auth.type === "apiKey") {
++              expect(refreshed.latestUsage).toBeUndefined();
++            }
++          }
++          expect(yield* fs.exists(marker)).toBe(false);
++        }),
++      ),
++  );
++
++  it.effect(
++    "publishes a notification while the CLI read is stalled and retains the newer report",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const input = yield* fixture();
++          const state = {
++            account: yield* Ref.make<MuseUsageAccount>(account),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(report),
++            permit: yield* Semaphore.make(1),
++          };
++          const started = yield* Deferred.make<void>();
++          const release = yield* Deferred.make<void>();
++          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++          const pending = yield* refreshState({
++            ...input,
++            provider: { ...provider, auth: { ...provider.auth, email: "b@example.com" } },
++            state,
++          }).pipe(
++            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
++              ...spawner,
++              spawn: (command) =>
++                Deferred.succeed(started, undefined).pipe(
++                  Effect.andThen(Deferred.await(release)),
++                  Effect.andThen(spawner.spawn(command)),
++                ),
++            }),
++            Effect.forkChild,
++          );
++          yield* Deferred.await(started);
++          expect(yield* Ref.get(state.account)).toEqual({
++            generation: 1,
++            identity: "b@example.com",
++          });
++          const newer = {
++            ...report,
++            generation: 1,
++            usage: {
++              ...report.usage,
++              observedAtMs: observedAtMs + 1,
++              window: { ...report.usage.window, usedPercent: 10 },
++            },
++          };
++          const published = yield* Deferred.make<void>();
++          yield* state.permit.withPermits(1)(
++            Ref.set(state.latestUsage, newer).pipe(
++              Effect.andThen(Deferred.succeed(published, undefined)),
++            ),
++          );
++          yield* Deferred.await(published);
++          expect(yield* Ref.get(state.latestUsage)).toBe(newer);
++          yield* Deferred.succeed(release, undefined);
++          const refreshed = yield* Fiber.join(pending);
++          expect(refreshed.latestUsage).toBe(newer);
++          expect(refreshed.provider.usageLimits?.windows[0]?.usedPercent).toBe(10);
++        }),
++      ),
++  );
++
++  it.effect("discards an in-flight read after the account generation changes", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture();
++        const state = {
++          account: yield* Ref.make<MuseUsageAccount>(account),
++          latestUsage: yield* Ref.make<MuseUsageReport | undefined>(report),
++          permit: yield* Semaphore.make(1),
++        };
++        const started = yield* Deferred.make<void>();
++        const release = yield* Deferred.make<void>();
++        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++        const pending = yield* refreshState({ ...input, state }).pipe(
++          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
++            ...spawner,
++            spawn: (command) =>
++              Deferred.succeed(started, undefined).pipe(
++                Effect.andThen(Deferred.await(release)),
++                Effect.andThen(spawner.spawn(command)),
++              ),
++          }),
++          Effect.forkChild,
++        );
++        yield* Deferred.await(started);
++        const signedOut = { generation: 1, identity: null };
++        yield* state.permit.withPermits(1)(
++          Ref.set(state.account, signedOut).pipe(
++            Effect.andThen(Ref.set(state.latestUsage, undefined)),
++          ),
++        );
++        yield* Deferred.succeed(release, undefined);
++        const refreshed = yield* Fiber.join(pending);
++        expect(refreshed.account).toBe(signedOut);
++        expect(refreshed.latestUsage).toBeUndefined();
++        expect(refreshed.provider.usageLimits).toBeUndefined();
++        expect(yield* Ref.get(state.account)).toBe(signedOut);
++      }),
++    ),
++  );
++
++  it.effect("bounds a stalled CLI read and keeps the last observation", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const input = yield* fixture();
++        const started = yield* Deferred.make<void>();
++        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++        const pending = yield* refreshMuseUsage({ ...input, latestUsage: report }).pipe(
++          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
++            ...spawner,
++            spawn: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
++          }),
++          Effect.forkChild,
++        );
++        yield* Deferred.await(started);
++        yield* TestClock.adjust("4 seconds");
++        const refreshed = yield* Fiber.join(pending);
++        expect(refreshed.latestUsage).toBe(report);
++        expect(refreshed.provider.status).toBe("warning");
++        expect(refreshed.provider.message).toContain("timed out");
++      }),
++    ),
++  );
++});
+diff --git a/packages/provider-muse/src/server/usageProbe.ts b/packages/provider-muse/src/server/usageProbe.ts
+new file mode 100644
+index 000000000000..d2e8863f2e35
+--- /dev/null
++++ b/packages/provider-muse/src/server/usageProbe.ts
+@@ -0,0 +1,179 @@
++import type { MuseSettings } from "../settings.ts";
++import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
++import { DEFAULT_TIMEOUT_MS, spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
++import { resolveSpawnCommand } from "@t3tools/shared/shell";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++import * as Ref from "effect/Ref";
++import * as Result from "effect/Result";
++import * as Semaphore from "effect/Semaphore";
++import * as ChildProcess from "effect/process/ChildProcess";
++import { MuseSubscriptionUsage } from "./protocol.ts";
++import { compareMuseVersions } from "./maintenance.ts";
++import {
++  museStatusUsageLimits,
++  museUsageAuth,
++  nextMuseUsageAccount,
++  type MuseUsageAccount,
++} from "./usageLimits.ts";
++import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
++
++const decodeUsage = Schema.decodeUnknownEffect(
++  Schema.fromJsonString(
++    Schema.Struct({
++      schemaVersion: Schema.Literal(1),
++      allowance: Schema.NullOr(
++        Schema.Struct({
++          asOfMs: MuseSubscriptionUsage.fields.observedAtMs,
++          tier: Schema.String,
++          window: Schema.Struct({
++            usedPercent: MuseSubscriptionUsage.fields.window.fields.usedPercent,
++            resetsAtMs: MuseSubscriptionUsage.fields.window.fields.resetsAtMs,
++          }),
++          weekly: MuseSubscriptionUsage.fields.weekly,
++        }),
++      ),
++    }),
++  ),
++);
++
++const readMuseUsage = Effect.fn("MuseUsageProbe.read")(
++  function* (settings: MuseSettings, environment: NodeJS.ProcessEnv, cwd?: string) {
++    const command = yield* resolveSpawnCommand(settings.binaryPath, ["usage", "--json"], {
++      env: environment,
++    });
++    const result = yield* spawnAndCollect(
++      settings.binaryPath,
++      ChildProcess.make(command.command, command.args, {
++        env: environment,
++        shell: command.shell,
++        ...(cwd ? { cwd } : {}),
++      }),
++    );
++    if (result.code !== 0) {
++      return yield* Effect.fail(
++        `Muse usage refresh failed (exit code ${result.code}). Check Muse Code on this T3 server host.`,
++      );
++    }
++    const { allowance } = yield* decodeUsage(result.stdout).pipe(
++      Effect.mapError(
++        () =>
++          "Muse usage refresh returned an invalid or unsupported response. Update Muse Code on this T3 server host.",
++      ),
++    );
++    if (!allowance) return undefined;
++    return {
++      observedAtMs: allowance.asOfMs,
++      tier: allowance.tier,
++      // CLI schema v1 omits duration; Meta's session allowance is a five-hour window.
++      window: { ...allowance.window, windowDurationMins: 300 },
++      weekly: allowance.weekly,
++    } satisfies MuseSubscriptionUsage;
++  },
++  Effect.timeout(DEFAULT_TIMEOUT_MS),
++  Effect.mapError((error) =>
++    typeof error === "string"
++      ? error
++      : error._tag === "TimeoutError"
++        ? "Muse usage refresh timed out. Try refreshing again."
++        : "Muse usage refresh could not run. Check its binary path on this T3 server host.",
++  ),
++  Effect.result,
++);
++
++export interface MuseUsageReport {
++  readonly usage: MuseSubscriptionUsage;
++  readonly generation: number;
++}
++
++export interface MuseUsageState {
++  readonly account: Ref.Ref<MuseUsageAccount>;
++  readonly latestUsage: Ref.Ref<MuseUsageReport | undefined>;
++  readonly permit: Semaphore.Semaphore;
++}
++
++export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (input: {
++  readonly settings: MuseSettings;
++  readonly environment: NodeJS.ProcessEnv;
++  readonly cwd?: string;
++  readonly provider: ServerProviderDraft;
++  readonly state: MuseUsageState;
++}) {
++  const { provider, state } = input;
++  const { account: initialAccount, dropped } = yield* state.permit.withPermits(1)(
++    Effect.gen(function* () {
++      const account = nextMuseUsageAccount(yield* Ref.get(state.account), provider.auth);
++      const latest = yield* Ref.get(state.latestUsage);
++      const dropped = latest !== undefined && latest.generation !== account.generation;
++      yield* Ref.set(state.account, account);
++      if (dropped) yield* Ref.set(state.latestUsage, undefined);
++      return { account, dropped };
++    }),
++  );
++  const canRead =
++    provider.enabled &&
++    provider.installed &&
++    provider.status !== "error" &&
++    provider.auth.status === "authenticated" &&
++    provider.auth.type === "accountLogin" &&
++    initialAccount.identity != null &&
++    provider.version !== null &&
++    compareMuseVersions(provider.version, "1.4.13") >= 0;
++  // Network I/O must not hold the permit shared with inline usage notifications.
++  const result = canRead
++    ? yield* readMuseUsage(input.settings, input.environment, input.cwd)
++    : undefined;
++  const usage = result && Result.isSuccess(result) ? result.success : undefined;
++  const message = result && Result.isFailure(result) ? result.failure : undefined;
++  return yield* state.permit.withPermits(1)(
++    Effect.gen(function* () {
++      const currentAccount = yield* Ref.get(state.account);
++      const previous = yield* Ref.get(state.latestUsage);
++      // Another refresh changed accounts while this CLI read was in flight.
++      if (currentAccount !== initialAccount) {
++        return {
++          account: currentAccount,
++          latestUsage: previous,
++          provider: { ...provider, usageLimits: undefined },
++        };
++      }
++      const account = currentAccount;
++      let latestUsage = previous;
++      if (usage && (!latestUsage || usage.observedAtMs > latestUsage.usage.observedAtMs)) {
++        latestUsage = { usage, generation: account.generation };
++      }
++      let usageLimits = museStatusUsageLimits({
++        auth: provider.auth,
++        enabled: provider.enabled,
++        observation: latestUsage?.usage,
++        dropped,
++        nowMs: DateTime.toEpochMillis(yield* DateTime.now),
++      });
++      if (message && !latestUsage && !dropped) {
++        usageLimits = makeUnavailableUsageLimits({
++          checkedAt: provider.checkedAt,
++          reason: "probeFailed",
++          message,
++        });
++      }
++      yield* Ref.set(state.account, account);
++      yield* Ref.set(state.latestUsage, latestUsage);
++      return {
++        account,
++        latestUsage,
++        provider: {
++          ...provider,
++          auth: latestUsage ? museUsageAuth(provider.auth, latestUsage.usage.tier) : provider.auth,
++          usageLimits,
++          ...(message
++            ? {
++                status: "warning" as const,
++                message: provider.message ? `${provider.message} ${message}` : message,
++              }
++            : {}),
++        },
++      };
++    }),
++  );
++});

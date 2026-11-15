@@ -1,0 +1,508 @@
+// Patch store for T3 Code. One script with no model, run by .github/workflows/nightly.yml.
+//
+// Commands:
+//   plan    --out <file> [--tag <tag>] [--replace]   pick the upstream nightly to publish
+//   sync    --tag <tag> --notices <file>             drop merged PRs from patches.json
+//   apply   --src <dir> --out <file> [--skip a,b]    apply the list to an upstream checkout
+//   marker  --archive <file> --report <file>         put PATCHES.json in a built server archive
+//   report  --plan <f> --apply <f> --notices <f> --server <state> --android <state> --out <dir>
+//   prune   --keep-days <n>                          delete store releases older than n days
+//
+// Each command prints one JSON line. The pure functions below have tests in store.test.ts.
+
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+export const UPSTREAM = "pingdotgg/t3code";
+export const MAX_OWN_PATCHES = 8;
+export const NIGHTLY_TAG = /^v(\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)$/;
+const MIGRATIONS_DIR = "apps/server/src/persistence/Migrations/";
+
+export interface UpstreamEntry {
+  readonly pr: number;
+  readonly head: string;
+  readonly bug: number;
+  readonly file: string;
+}
+
+export interface OwnEntry {
+  readonly id: string;
+  readonly bug: number;
+  readonly file: string;
+  readonly check: string;
+  readonly dropWhen: string;
+}
+
+export interface PatchList {
+  readonly keepDays: number;
+  readonly upstream: ReadonlyArray<UpstreamEntry>;
+  readonly own: ReadonlyArray<OwnEntry>;
+}
+
+export type Part = "server" | "mobile";
+
+export interface Applied {
+  readonly id: string;
+  readonly parts: ReadonlyArray<Part>;
+}
+
+export interface Skipped {
+  readonly id: string;
+  readonly reason: string;
+}
+
+export interface ApplyResult {
+  readonly applied: ReadonlyArray<Applied>;
+  readonly skipped: ReadonlyArray<Skipped>;
+  readonly server: boolean;
+  readonly mobile: boolean;
+}
+
+export interface Release {
+  readonly tagName: string;
+  readonly publishedAt: string;
+  readonly isDraft?: boolean;
+}
+
+export interface Plan {
+  readonly needed: boolean;
+  readonly tag: string;
+  readonly version: string;
+  readonly latest: boolean;
+}
+
+export interface PrState {
+  readonly state: "OPEN" | "CLOSED" | "MERGED";
+  readonly headRefOid: string;
+  readonly mergeCommit: string | null;
+}
+
+export type Notice =
+  | { readonly kind: "merged"; readonly pr: number; readonly tag: string }
+  | { readonly kind: "new-head"; readonly pr: number; readonly head: string }
+  | { readonly kind: "closed"; readonly pr: number };
+
+/** The id of a list entry, as the report and the --skip input name it. */
+export const entryId = (entry: UpstreamEntry | OwnEntry): string =>
+  "pr" in entry ? `pr-${entry.pr}` : entry.id;
+
+/** Upstream PRs first, then own patches, each in list order. Own patches can build on PRs. */
+export const applyOrder = (list: PatchList): ReadonlyArray<UpstreamEntry | OwnEntry> => [
+  ...list.upstream,
+  ...list.own,
+];
+
+export function validateList(list: PatchList): ReadonlyArray<string> {
+  const errors: string[] = [];
+  if (list.own.length > MAX_OWN_PATCHES) {
+    errors.push(`${list.own.length} own patches, the cap is ${MAX_OWN_PATCHES}`);
+  }
+  const ids = applyOrder(list).map(entryId);
+  for (const id of new Set(ids)) {
+    if (ids.filter((other) => other === id).length > 1) errors.push(`duplicate entry ${id}`);
+  }
+  for (const entry of list.upstream) {
+    if (!/^[0-9a-f]{40}$/.test(entry.head)) errors.push(`pr-${entry.pr} head is not a full SHA`);
+  }
+  for (const entry of list.own) {
+    if (!entry.check.trim() || !entry.dropWhen.trim()) {
+      errors.push(`${entry.id} needs a check and a dropWhen line`);
+    }
+  }
+  return errors;
+}
+
+/** The paths that a unified diff changes, from its `diff --git a/x b/y` lines. */
+export function patchPaths(patch: string): ReadonlyArray<string> {
+  const paths = new Set<string>();
+  for (const match of patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)) {
+    paths.add(match[1]!);
+    paths.add(match[2]!);
+  }
+  return [...paths];
+}
+
+/** Which build a patch needs. Docs change no build; `apps/mobile` is the phone; the rest is the server. */
+export function partsOf(paths: ReadonlyArray<string>): ReadonlyArray<Part> {
+  const parts = new Set<Part>();
+  for (const path of paths) {
+    if (path.startsWith("docs/") || path.endsWith(".md")) continue;
+    parts.add(path.startsWith("apps/mobile/") ? "mobile" : "server");
+  }
+  return [...parts].sort();
+}
+
+/** A reason to refuse a patch before it is applied, or undefined. */
+export function refusalOf(paths: ReadonlyArray<string>): string | undefined {
+  return paths.some((path) => path.startsWith(MIGRATIONS_DIR))
+    ? "adds a database migration, which blocks the next plain build"
+    : undefined;
+}
+
+/**
+ * The nightly to publish. With no `tag`, the newest published upstream nightly. It is needed
+ * when the store has no release of it yet, or when `replace` asks to publish it again.
+ */
+export function selectTarget(input: {
+  readonly upstream: ReadonlyArray<Release>;
+  readonly store: ReadonlyArray<Release>;
+  readonly tag?: string;
+  readonly replace?: boolean;
+}): Plan {
+  const nightlies = input.upstream
+    .filter((release) => !release.isDraft && NIGHTLY_TAG.test(release.tagName))
+    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+  const newest = nightlies[0];
+  if (newest === undefined) throw new Error("upstream has no published nightly");
+  const tag = input.tag?.trim() || newest.tagName;
+  const version = NIGHTLY_TAG.exec(tag)?.[1];
+  if (version === undefined) throw new Error(`${tag} is not a nightly tag`);
+  if (!nightlies.some((release) => release.tagName === tag)) {
+    throw new Error(`upstream has no published release ${tag}`);
+  }
+  const published = input.store.some((release) => release.tagName === tag);
+  const newerInStore = input.store.some(
+    (release) => NIGHTLY_TAG.test(release.tagName) && compareNightly(release.tagName, tag) > 0,
+  );
+  return {
+    needed: !published || input.replace === true,
+    tag,
+    version,
+    latest: tag === newest.tagName && !newerInStore,
+  };
+}
+
+/** Orders 2 nightly tags by date, then by build number. */
+export function compareNightly(a: string, b: string): number {
+  const key = (tag: string) => {
+    const match = /-nightly\.(\d{8})\.(\d+)$/.exec(tag);
+    if (match === null) throw new Error(`${tag} is not a nightly tag`);
+    return [Number(match[1]), Number(match[2])] as const;
+  };
+  const [dateA, buildA] = key(a);
+  const [dateB, buildB] = key(b);
+  return dateA - dateB || buildA - buildB;
+}
+
+/**
+ * The list after an upstream nightly. A PR merged into `tag` leaves the list. The merge is read
+ * from the PR state and its merge commit, because a squash merge does not keep the head SHA.
+ * A PR with a new head keeps its pin. A closed PR stays until Morgan decides.
+ */
+export function syncEntries(input: {
+  readonly entries: ReadonlyArray<UpstreamEntry>;
+  readonly states: ReadonlyMap<number, PrState>;
+  readonly inTag: (mergeCommit: string) => boolean;
+  readonly tag: string;
+}): { readonly keep: ReadonlyArray<UpstreamEntry>; readonly notices: ReadonlyArray<Notice> } {
+  const keep: UpstreamEntry[] = [];
+  const notices: Notice[] = [];
+  for (const entry of input.entries) {
+    const state = input.states.get(entry.pr);
+    if (state === undefined) throw new Error(`no state for PR ${entry.pr}`);
+    if (state.state === "MERGED" && state.mergeCommit !== null && input.inTag(state.mergeCommit)) {
+      notices.push({ kind: "merged", pr: entry.pr, tag: input.tag });
+      continue;
+    }
+    keep.push(entry);
+    if (state.state === "CLOSED") notices.push({ kind: "closed", pr: entry.pr });
+    else if (state.state === "OPEN" && state.headRefOid !== entry.head) {
+      notices.push({ kind: "new-head", pr: entry.pr, head: state.headRefOid });
+    }
+  }
+  return { keep, notices };
+}
+
+/** Store releases to delete: nightlies older than `keepDays`, never the newest one. */
+export function releasesToPrune(
+  releases: ReadonlyArray<Release>,
+  now: Date,
+  keepDays: number,
+): ReadonlyArray<string> {
+  const nightlies = releases
+    .filter((release) => NIGHTLY_TAG.test(release.tagName))
+    .sort((a, b) => compareNightly(b.tagName, a.tagName));
+  const cutoff = now.getTime() - keepDays * 24 * 60 * 60 * 1000;
+  return nightlies
+    .slice(1)
+    .filter((release) => Date.parse(release.publishedAt) < cutoff)
+    .map((release) => release.tagName);
+}
+
+export type BuildState = "built" | "copied" | "failed" | "not-needed";
+
+export interface Report {
+  readonly version: string;
+  readonly upstreamTag: string;
+  readonly server: BuildState;
+  readonly android: BuildState;
+  readonly applied: ReadonlyArray<Applied>;
+  readonly skipped: ReadonlyArray<Skipped>;
+  readonly notices: ReadonlyArray<Notice>;
+  /** True when a repair chat has work: a skipped patch, a failed build or a closed PR. */
+  readonly needsRepair: boolean;
+}
+
+export function buildReport(input: {
+  readonly plan: Plan;
+  readonly apply: ApplyResult;
+  readonly notices: ReadonlyArray<Notice>;
+  readonly server: BuildState;
+  readonly android: BuildState;
+}): Report {
+  return {
+    version: input.plan.version,
+    upstreamTag: input.plan.tag,
+    server: input.server,
+    android: input.android,
+    applied: input.apply.applied,
+    skipped: input.apply.skipped,
+    notices: input.notices,
+    needsRepair:
+      input.apply.skipped.length > 0 ||
+      input.server === "failed" ||
+      input.android === "failed" ||
+      input.notices.some((notice) => notice.kind === "closed"),
+  };
+}
+
+export function releaseNotes(report: Report): string {
+  const line = (applied: Applied) => `- ${applied.id} (${applied.parts.join(", ") || "docs"})`;
+  return [
+    `Upstream ${report.upstreamTag} plus the patches below.`,
+    "",
+    `Server archive: ${report.server}. Android APK: ${report.android}.`,
+    "",
+    "Applied:",
+    ...(report.applied.length > 0 ? report.applied.map(line) : ["- none"]),
+    "",
+    "Left out:",
+    ...(report.skipped.length > 0
+      ? report.skipped.map((skipped) => `- ${skipped.id}: ${skipped.reason}`)
+      : ["- none"]),
+    ...(report.notices.length > 0
+      ? ["", "Notices:", ...report.notices.map((notice) => `- ${JSON.stringify(notice)}`)]
+      : []),
+    "",
+    "PATCHES.json holds the same data.",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Side effects. Each uses git, gh or tar.
+
+const run = (command: string, args: ReadonlyArray<string>, cwd?: string): string =>
+  execFileSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+const tryRun = (command: string, args: ReadonlyArray<string>, cwd?: string) => {
+  try {
+    return { ok: true as const, out: run(command, args, cwd) };
+  } catch (error) {
+    const stderr = (error as { stderr?: string }).stderr ?? String(error);
+    return { ok: false as const, out: stderr.trim().split("\n").slice(-3).join(" ") };
+  }
+};
+
+const readJson = <T>(file: string): T => JSON.parse(readFileSync(file, "utf8")) as T;
+const writeJson = (file: string, value: unknown) =>
+  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+
+const LIST_FILE = "patches.json";
+const loadList = (): PatchList => readJson<PatchList>(LIST_FILE);
+
+function storeRepo(): string {
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!repo) throw new Error("GITHUB_REPOSITORY is not set");
+  return repo;
+}
+
+function listReleases(repo: string): ReadonlyArray<Release> {
+  const out = run("gh", [
+    "api",
+    "--paginate",
+    `repos/${repo}/releases?per_page=100`,
+    "--jq",
+    ".[] | {tagName: .tag_name, publishedAt: .published_at, isDraft: .draft}",
+  ]);
+  return out
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as Release)
+    .filter((release) => release.publishedAt !== null);
+}
+
+function upstreamNightlies(): ReadonlyArray<Release> {
+  const out = run("gh", [
+    "api",
+    `repos/${UPSTREAM}/releases?per_page=30`,
+    "--jq",
+    ".[] | {tagName: .tag_name, publishedAt: .published_at, isDraft: .draft}",
+  ]);
+  return out
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as Release);
+}
+
+function prState(pr: number): PrState {
+  const raw = JSON.parse(
+    run("gh", ["pr", "view", String(pr), "--repo", UPSTREAM, "--json", "state,headRefOid,mergeCommit"]),
+  ) as { state: PrState["state"]; headRefOid: string; mergeCommit: { oid: string } | null };
+  return { state: raw.state, headRefOid: raw.headRefOid, mergeCommit: raw.mergeCommit?.oid ?? null };
+}
+
+/** True when `tag` holds `commit`. GitHub's compare reads "behind" or "identical" then. */
+function tagHolds(tag: string, commit: string): boolean {
+  const status = run("gh", [
+    "api",
+    `repos/${UPSTREAM}/compare/${tag}...${commit}`,
+    "--jq",
+    ".status",
+  ]).trim();
+  return status === "behind" || status === "identical";
+}
+
+function applyList(src: string, skip: ReadonlySet<string>): ApplyResult {
+  const list = loadList();
+  const applied: Applied[] = [];
+  const skipped: Skipped[] = [];
+  for (const entry of applyOrder(list)) {
+    const id = entryId(entry);
+    if (skip.has(id) || skip.has("all")) {
+      skipped.push({ id, reason: "left out by the run input" });
+      continue;
+    }
+    const patchFile = join(process.cwd(), entry.file);
+    const paths = patchPaths(readFileSync(patchFile, "utf8"));
+    const refusal = refusalOf(paths);
+    if (refusal !== undefined) {
+      skipped.push({ id, reason: refusal });
+      continue;
+    }
+    const result = tryRun("git", ["apply", "--whitespace=nowarn", patchFile], src);
+    if (result.ok) applied.push({ id, parts: partsOf(paths) });
+    else skipped.push({ id, reason: `does not apply: ${result.out}` });
+  }
+  return {
+    applied,
+    skipped,
+    server: applied.some((item) => item.parts.includes("server")),
+    mobile: applied.some((item) => item.parts.includes("mobile")),
+  };
+}
+
+/** Adds PATCHES.json to the top folder of a built .tar.gz. Upstream copies are never touched. */
+function addMarker(archive: string, reportFile: string) {
+  const work = mkdtempSync(join(tmpdir(), "t3-marker-"));
+  run("tar", ["-xzf", archive, "-C", work]);
+  const top = readdirSync(work);
+  if (top.length !== 1) throw new Error(`archive has ${top.length} top entries, expected 1`);
+  writeFileSync(join(work, top[0]!, "PATCHES.json"), readFileSync(reportFile));
+  unlinkSync(archive);
+  run("tar", ["-czf", archive, "-C", work, top[0]!]);
+}
+
+function argValue(args: ReadonlyArray<string>, name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
+}
+
+function required(args: ReadonlyArray<string>, name: string): string {
+  const value = argValue(args, name);
+  if (value === undefined || value === "") throw new Error(`${name} is required`);
+  return value;
+}
+
+function main(argv: ReadonlyArray<string>) {
+  const [command, ...args] = argv;
+  switch (command) {
+    case "validate": {
+      const errors = validateList(loadList());
+      for (const entry of applyOrder(loadList())) {
+        if (!existsSync(entry.file)) (errors as string[]).push(`${entryId(entry)}: ${entry.file} is missing`);
+      }
+      console.log(JSON.stringify({ ok: errors.length === 0, errors }));
+      if (errors.length > 0) process.exitCode = 1;
+      return;
+    }
+    case "plan": {
+      const errors = validateList(loadList());
+      if (errors.length > 0) throw new Error(errors.join("; "));
+      const plan = selectTarget({
+        upstream: upstreamNightlies(),
+        store: listReleases(storeRepo()),
+        tag: argValue(args, "--tag"),
+        replace: args.includes("--replace"),
+      });
+      writeJson(required(args, "--out"), plan);
+      console.log(JSON.stringify(plan));
+      return;
+    }
+    case "sync": {
+      const tag = required(args, "--tag");
+      const list = loadList();
+      const states = new Map(list.upstream.map((entry) => [entry.pr, prState(entry.pr)] as const));
+      const { keep, notices } = syncEntries({
+        entries: list.upstream,
+        states,
+        inTag: (commit) => tagHolds(tag, commit),
+        tag,
+      });
+      for (const entry of list.upstream) {
+        if (!keep.includes(entry) && existsSync(entry.file)) unlinkSync(entry.file);
+      }
+      writeJson(LIST_FILE, { ...list, upstream: keep });
+      writeJson(required(args, "--notices"), notices);
+      console.log(JSON.stringify({ notices }));
+      return;
+    }
+    case "apply": {
+      const skip = new Set(
+        (argValue(args, "--skip") ?? "")
+          .split(",")
+          .map((id) => id.trim())
+          .filter((id) => id !== ""),
+      );
+      const result = applyList(required(args, "--src"), skip);
+      writeJson(required(args, "--out"), result);
+      console.log(JSON.stringify(result));
+      return;
+    }
+    case "marker": {
+      addMarker(required(args, "--archive"), required(args, "--report"));
+      console.log(JSON.stringify({ ok: true }));
+      return;
+    }
+    case "report": {
+      const report = buildReport({
+        plan: readJson<Plan>(required(args, "--plan")),
+        apply: readJson<ApplyResult>(required(args, "--apply")),
+        notices: readJson<ReadonlyArray<Notice>>(required(args, "--notices")),
+        server: required(args, "--server") as BuildState,
+        android: required(args, "--android") as BuildState,
+      });
+      const out = required(args, "--out");
+      writeJson(join(out, "PATCHES.json"), report);
+      writeFileSync(join(out, "notes.md"), `${releaseNotes(report)}\n`);
+      console.log(JSON.stringify(report));
+      return;
+    }
+    case "prune": {
+      const repo = storeRepo();
+      const keepDays = Number(argValue(args, "--keep-days") ?? loadList().keepDays);
+      const tags = releasesToPrune(listReleases(repo), new Date(), keepDays);
+      for (const tag of tags) run("gh", ["release", "delete", tag, "--repo", repo, "--yes", "--cleanup-tag"]);
+      console.log(JSON.stringify({ deleted: tags }));
+      return;
+    }
+    default:
+      throw new Error(`unknown command ${command ?? "(none)"}`);
+  }
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2));
+}
