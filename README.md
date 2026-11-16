@@ -10,9 +10,11 @@ decisions.
 - `patches.json` is the list. Upstream PRs come first, each pinned to a head
   SHA with its saved diff in `patches/upstream/`. Own patches follow, each with
   its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 8
-  own patches, bug fixes only. One exception: `1448-form-free-text-mic`, the mic
-  button in the free-text answer of a question form. Morgan allowed this one
-  feature in Shell issue 1448.
+  own patches, bug fixes only. Morgan allowed these exceptions:
+  - `1448-form-free-text-mic`, the mic button in the free-text answer of a
+    question form, in Shell issue 1448.
+  - `1456-notice-hold`, the child end notice hold, on 2026-11-16 in
+    [Shell issue 1456](https://github.com/Mgdev-25/shell/issues/1456).
 - `.github/workflows/nightly.yml` runs with no model. Its cron asks for a run
   every 30 minutes, but GitHub drops most of these runs. So the Shell timer
   `patch-store-gate` on Morgan's PC also starts it for each new nightly with no

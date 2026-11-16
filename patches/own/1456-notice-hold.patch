@@ -1,0 +1,360 @@
+diff --git a/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts b/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
+index e26487fdf2..8e88c7bf50 100644
+--- a/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
++++ b/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
+@@ -1405,7 +1405,7 @@ const seedRestartCancelledChild = (input: {
+   readonly name: string;
+   readonly completionWake: "always" | "settled_only";
+   readonly continuationPending: boolean;
+-  readonly runStatus?: "cancelled" | "completed";
++  readonly runStatus?: "cancelled" | "completed" | "running";
+   readonly lostWork?: OrchestrationV2Run["restartCancelledBackgroundWork"];
+   readonly now: DateTime.Utc;
+ }) =>
+@@ -1515,6 +1515,227 @@ const seedRestartCancelledChild = (input: {
+     return { taskId, childThreadId, childRunId };
+   });
+ 
++const seedNoticeHold = (key: string, childCount: number) =>
++  Effect.gen(function* () {
++    const orchestrator = yield* Orchestrator.OrchestratorV2;
++    const sink = yield* EventSink.EventSinkV2;
++    const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
++    const now = yield* DateTime.now;
++    const threadId = ThreadId.make(`thread:${key}`);
++    const projectId = ProjectId.make(`project:${key}`);
++    const runId = RunId.make(`run:${key}`);
++    const rootNodeId = NodeId.make(`root:${key}`);
++    yield* seedParentWithTerminalTask({
++      threadId,
++      projectId,
++      runId,
++      rootNodeId,
++      taskId: NodeId.make(`seed:${key}`),
++      deliveryState: "acknowledged",
++      parentRunStatus: "completed",
++      now,
++    });
++    const children = yield* Effect.forEach(
++      Array.from({ length: childCount }, (_, i) => i),
++      (i) =>
++        seedRestartCancelledChild({
++          parentThreadId: threadId,
++          projectId,
++          parentRunId: runId,
++          rootNodeId,
++          name: `${key}-${i}`,
++          completionWake: "always",
++          continuationPending: false,
++          runStatus: "running",
++          now,
++        }),
++    );
++    const offer = vi.spyOn(requests, "offer");
++    const complete = (index: number) =>
++      Effect.gen(function* () {
++        const child = children[index]!;
++        const run = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs[0]!;
++        const completedAt = yield* DateTime.now;
++        yield* sink.write({
++          commandId: reconcileCommandId(`${key}-finish-${index}`),
++          events: [
++            {
++              id: EventId.make(`event:${key}-finish-${index}`),
++              type: "run.updated",
++              threadId: child.childThreadId,
++              runId: run.id,
++              occurredAt: completedAt,
++              payload: { ...run, status: "completed", completedAt },
++            },
++          ],
++        });
++        yield* orchestrator.recoverDelegatedTask(child.childThreadId);
++      });
++    const deliver = Effect.gen(function* () {
++      let request = yield* requests.take;
++      while (request.threadId !== threadId) request = yield* requests.take;
++      const delivery = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
++        (run) => run.id === runId,
++      )!.delegatedCompletion!.delivery!;
++      assert.equal(request.delegatedCompletion?.messageId, delivery.messageId);
++      yield* orchestrator.dispatch({
++        type: "message.dispatch",
++        commandId: CommandId.make(`command:${key}-deliver`),
++        threadId,
++        messageId: delivery.messageId,
++        text: "Delegated tasks finished.",
++        attachments: [],
++        createdBy: "agent",
++        creationSource: "server",
++        dispatchMode: { type: "queue_after_active" },
++        delegatedCompletion: {
++          parentRunId: runId,
++          generation: delivery.generation,
++          taskIds: delivery.taskIds,
++        },
++      });
++      const projection = yield* orchestrator.getThreadProjection(threadId);
++      const messages = projection.messages.filter(
++        (message) => message.delegatedCompletion !== undefined,
++      );
++      assert.lengthOf(messages, 1);
++      assert.lengthOf(
++        projection.runs.filter((run) => run.userMessageId === delivery.messageId),
++        1,
++      );
++      return messages[0]!.delegatedCompletion!.taskIds;
++    });
++    return { orchestrator, sink, now, threadId, runId, children, offer, complete, deliver };
++  });
++
++it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
++  "idle parent notice hold",
++  (it) => {
++    it.effect("groups two child ends 30 seconds apart into one notice run", () =>
++      Effect.gen(function* () {
++        const test = yield* seedNoticeHold("notice-hold-pair", 2);
++        yield* Effect.gen(function* () {
++          yield* test.complete(0);
++          assert.equal(test.offer.mock.calls.length, 0);
++          yield* TestClock.adjust("30 seconds");
++          yield* test.complete(1);
++          assert.equal(test.offer.mock.calls.length, 1);
++          assert.deepEqual(
++            yield* test.deliver,
++            test.children.map((child) => child.taskId),
++          );
++          yield* TestClock.adjust("120 seconds");
++          assert.equal(test.offer.mock.calls.length, 1);
++        }).pipe(Effect.ensuring(Effect.sync(() => test.offer.mockRestore())));
++      }),
++    );
++
++    it.effect("releases on the next child end while a third child still runs", () =>
++      Effect.gen(function* () {
++        const test = yield* seedNoticeHold("notice-hold-three", 3);
++        yield* Effect.gen(function* () {
++          yield* test.complete(0);
++          assert.equal(test.offer.mock.calls.length, 0);
++          yield* TestClock.adjust("30 seconds");
++          yield* test.complete(1);
++          assert.equal(test.offer.mock.calls.length, 1);
++          assert.deepEqual(
++            yield* test.deliver,
++            test.children.slice(0, 2).map((child) => child.taskId),
++          );
++        }).pipe(Effect.ensuring(Effect.sync(() => test.offer.mockRestore())));
++      }),
++    );
++
++    it.effect.each([30, 130])("restores the saved hold after a restart at %s seconds", (elapsed) =>
++      Effect.gen(function* () {
++        const test = yield* seedNoticeHold(`notice-hold-restart-${elapsed}`, 2);
++        yield* Effect.gen(function* () {
++          const parent = yield* test.orchestrator.getThreadProjection(test.threadId);
++          const first = parent.subagents.find((task) => task.id === test.children[0]!.taskId)!;
++          const run = parent.runs.find((run) => run.id === test.runId)!;
++          yield* test.sink.write({
++            commandId: reconcileCommandId(`notice-hold-restart-${elapsed}`),
++            events: [
++              {
++                id: EventId.make(`event:notice-hold-restart-${elapsed}-task`),
++                type: "subagent.updated",
++                threadId: test.threadId,
++                runId: test.runId,
++                nodeId: first.id,
++                occurredAt: test.now,
++                payload: {
++                  ...first,
++                  status: "completed",
++                  result: "Finished before restart.",
++                  completedAt: test.now,
++                  completionDelivery: { state: "claimed", observedByRunId: null },
++                },
++              },
++              {
++                id: EventId.make(`event:notice-hold-restart-${elapsed}-run`),
++                type: "run.updated",
++                threadId: test.threadId,
++                runId: test.runId,
++                occurredAt: test.now,
++                payload: {
++                  ...run,
++                  delegatedCompletion: {
++                    disposition: "open",
++                    nextGeneration: 2,
++                    delivery: {
++                      generation: 1,
++                      messageId: MessageId.make(`message:notice-hold-restart-${elapsed}`),
++                      taskIds: [first.id],
++                    },
++                  },
++                },
++              },
++            ],
++          });
++          // Startup sees the saved rows but has no in-memory hold timer.
++          yield* TestClock.adjust(`${elapsed} seconds`);
++          yield* test.orchestrator.recoverDelegatedTasks;
++          if (elapsed < 120) {
++            assert.equal(test.offer.mock.calls.length, 0);
++            yield* TestClock.adjust(`${119 - elapsed} seconds`);
++            assert.equal(test.offer.mock.calls.length, 0);
++            yield* TestClock.adjust("1 second");
++          }
++          assert.deepEqual(yield* test.deliver, [first.id]);
++          assert.equal(test.offer.mock.calls.length, 1);
++        }).pipe(Effect.ensuring(Effect.sync(() => test.offer.mockRestore())));
++      }),
++    );
++
++    it.effect("delivers a single child notice at once", () =>
++      Effect.gen(function* () {
++        const test = yield* seedNoticeHold("notice-hold-single", 1);
++        yield* Effect.gen(function* () {
++          yield* test.complete(0);
++          assert.equal(test.offer.mock.calls.length, 1);
++          assert.deepEqual(yield* test.deliver, [test.children[0]!.taskId]);
++        }).pipe(Effect.ensuring(Effect.sync(() => test.offer.mockRestore())));
++      }),
++    );
++
++    it.effect("delivers at 120 seconds while another child still runs", () =>
++      Effect.gen(function* () {
++        const test = yield* seedNoticeHold("notice-hold-limit", 2);
++        yield* Effect.gen(function* () {
++          yield* test.complete(0);
++          assert.equal(test.offer.mock.calls.length, 0);
++          yield* TestClock.adjust("119 seconds");
++          assert.equal(test.offer.mock.calls.length, 0);
++          yield* TestClock.adjust("1 second");
++          assert.deepEqual(yield* test.deliver, [test.children[0]!.taskId]);
++          assert.equal(test.offer.mock.calls.length, 1);
++        }).pipe(Effect.ensuring(Effect.sync(() => test.offer.mockRestore())));
++      }),
++    );
++  },
++);
++
+ // Parent spawned two always-wake tasks: the incoming one's completion wake is queued behind a busy
+ // run while the sibling's child run is still going.
+ const queueCompletionWakeBesideRunningSibling = (key: string) =>
+@@ -3837,6 +4058,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
+           );
+           assert.equal(followup.cancelledRunId, outcome === "cancelled" ? run.id : undefined);
+           if (outcome !== "stopped" && outcome !== "cancelled") {
++            if (outcome === "overlapping") yield* TestClock.adjust("120 seconds");
+             let wake = yield* requests.take;
+             while (
+               wake.threadId !== parentThreadId ||
+diff --git a/apps/server/src/orchestration-v2/Orchestrator.ts b/apps/server/src/orchestration-v2/Orchestrator.ts
+index 27f7aa82fd..fc42e02036 100644
+--- a/apps/server/src/orchestration-v2/Orchestrator.ts
++++ b/apps/server/src/orchestration-v2/Orchestrator.ts
+@@ -95,6 +95,7 @@ import * as DateTime from "effect/DateTime";
+ import * as Effect from "effect/Effect";
+ import * as Exit from "effect/Exit";
+ import * as FileSystem from "effect/FileSystem";
++import * as Fiber from "effect/Fiber";
+ import * as Path from "effect/Path";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+@@ -168,6 +169,7 @@ import {
+   threadShellFromProjection,
+   ProjectionStoreV2,
+   type ProjectionRecordField,
++  type ProjectionStoreV2Error,
+   type ProjectionTimelinePage,
+   type ProjectionTimelinePageOptions,
+   type ProjectionRecordFilter,
+@@ -1583,6 +1585,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+   const threadForkService = yield* ThreadForkServiceV2;
+   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+   const messageIntake = yield* KeyedLock.make<ThreadId>();
++  const completionHoldScope = yield* Effect.scope;
++  const heldCompletionDeliveries = new Map<
++    MessageId,
++    { readonly threadId: ThreadId; readonly parentRunId: RunId; readonly fiber: Fiber.Fiber<void> }
++  >();
+   // Read once: the policy is fixed for the server's life, and dispatch takes it as an input.
+   const { managedPolicy } = serverSettings;
+   const runtimeModeCeiling: RuntimeModeCeiling | undefined =
+@@ -2008,7 +2015,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+ 
+   const offerDelegatedCompletionDelivery =
+     /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+-    Effect.fnUntraced(function* (threadId: ThreadId, parentRunId: RunId) {
++    Effect.fnUntraced(function* (
++      threadId: ThreadId,
++      parentRunId: RunId,
++    ): Effect.fn.Return<void, ProjectionStoreV2Error> {
+       const controls = yield* projectionStore.getThreadRecords(threadId, ["runs"], {
+         runIds: [parentRunId],
+       });
+@@ -2040,6 +2050,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+         if (!isUndeliveredMailboxSteer({ ...messages, ...runs, ...turns }, delivery.messageId))
+           return;
+       }
++      if (message === undefined) {
++        const records = yield* projectionStore.getThreadRecords(threadId, ["runs", "subagents"]);
++        const idle = !records.runs.some((run) => isLiveRun(run) || run.status === "queued");
++        const runningSibling = records.subagents.some(
++          (task) =>
++            task.origin === "app_owned" &&
++            !delivery.taskIds.includes(task.id) &&
++            (task.status === "pending" || task.status === "running" || task.status === "waiting"),
++        );
++        // The reserved delivery and its children's finish times survive a restart.
++        const finishTimes = records.subagents.flatMap((task) =>
++          delivery.taskIds.includes(task.id) && task.completedAt !== null
++            ? [DateTime.toEpochMillis(task.completedAt)]
++            : [],
++        );
++        const remaining =
++          finishTimes.length === 0
++            ? 0
++            : Math.min(...finishTimes) + 120_000 - DateTime.toEpochMillis(yield* DateTime.now);
++        if (idle && runningSibling && delivery.taskIds.length === 1 && remaining > 0) {
++          if (!heldCompletionDeliveries.has(delivery.messageId)) {
++            const fiber = yield* Effect.sleep(`${remaining} millis`).pipe(
++              Effect.andThen(
++                threadDispatch.withLock(
++                  threadId,
++                  Effect.gen(function* () {
++                    if (!heldCompletionDeliveries.delete(delivery.messageId)) return;
++                    yield* offerDelegatedCompletionDelivery(threadId, parentRunId);
++                  }),
++                ),
++              ),
++              Effect.catchCause((cause) =>
++                Effect.logWarning("Failed to deliver held delegated completion", {
++                  threadId,
++                  parentRunId,
++                  cause,
++                }),
++              ),
++              Effect.forkIn(completionHoldScope, { startImmediately: true }),
++            );
++            heldCompletionDeliveries.set(delivery.messageId, { threadId, parentRunId, fiber });
++          }
++          return;
++        }
++      }
++      const held = heldCompletionDeliveries.get(delivery.messageId);
++      heldCompletionDeliveries.delete(delivery.messageId);
++      if (held !== undefined) yield* Fiber.interrupt(held.fiber);
+       const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"], {
+         providerThreadIds: parentRun.providerThreadId === null ? [] : [parentRun.providerThreadId],
+       });
+@@ -14604,6 +14662,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+       if (completionPlan.offer && completionPlan.parentRun !== undefined) {
+         yield* offerDelegatedCompletionDelivery(parentThreadId, completionPlan.parentRun.id);
+       }
++      for (const held of heldCompletionDeliveries.values()) {
++        if (held.threadId === parentThreadId && held.parentRunId !== completionPlan.parentRun?.id) {
++          yield* offerDelegatedCompletionDelivery(parentThreadId, held.parentRunId);
++        }
++      }
+     },
+   );
+ 
