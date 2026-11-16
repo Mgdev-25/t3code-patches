@@ -1,3 +1,119 @@
+diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
+index 8dcfb78747..e6baec4ea1 100644
+--- a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
++++ b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
+@@ -9,6 +9,7 @@ import type { PendingUserInput } from "../../lib/threadActivity";
+ const harness = vi.hoisted(() => ({
+   navigate: [] as Array<[string, object | undefined]>,
+   openedUrls: [] as string[],
++  voice: { isBusy: false, ownerKey: null as string | null },
+ }));
+ 
+ type Children = { children?: ReactNode };
+@@ -37,7 +38,19 @@ vi.mock("../../components/ui/AppText", () => ({
+   AppText: ({ children }: Children) => <span>{children}</span>,
+ }));
+ vi.mock("../../components/ui/ControlPill", () => ({ ControlPill: () => null }));
+-vi.mock("../../components/ui/Button", () => ({ Button: () => null }));
++vi.mock("../../components/ui/Button", () => ({
++  Button: (props: { label: string; disabled?: boolean }) => (
++    <button type="button" disabled={props.disabled}>
++      {props.label}
++    </button>
++  ),
++}));
++vi.mock("../voice-input/VoiceInputProvider", () => ({
++  useGlobalVoiceInput: () => harness.voice,
++}));
++vi.mock("../../state/question-attachments", () => ({
++  questionAttachmentDraftKey: (...parts: string[]) => parts.join(":"),
++}));
+ vi.mock("./QuestionAttachments", () => ({ QuestionAttachments: () => null }));
+ vi.mock("../files/FileMarkdownPreview", () => ({
+   useMarkdownPreviewStyles: () => ({ nativeTextStyle: {} }),
+@@ -104,7 +117,7 @@ function setup(questionMarkdown: string) {
+         collapsed={false}
+         onToggleCollapsed={() => {}}
+         drafts={{}}
+-        answers={null}
++        answers={{ "question-1": "First" }}
+         respondingUserInputId={null}
+         onSelectOption={() => {}}
+         onChangeCustomAnswer={() => {}}
+@@ -114,6 +127,10 @@ function setup(questionMarkdown: string) {
+     ),
+   );
+   return {
++    submitDisabled: () =>
++      [...container.querySelectorAll("button")].find(
++        (button) => button.textContent === "Submit answers",
++      )!.disabled,
+     async pressLink(label: string) {
+       const link = [...container.querySelectorAll("button")].find(
+         (button) => button.textContent === label,
+@@ -140,3 +157,17 @@ it("opens a workspace file link in a question in the thread's file viewer", asyn
+     ],
+   ]);
+ });
++
++it("holds the submit while an answer of this form is dictated", () => {
++  harness.voice = { isBusy: true, ownerKey: "env-1:thread-1:request-1:question-1" };
++  {
++    using screen = setup("Which path?");
++    expect(screen.submitDisabled()).toBe(true);
++  }
++  harness.voice = { isBusy: true, ownerKey: "composer-draft" };
++  {
++    using screen = setup("Which path?");
++    expect(screen.submitDisabled()).toBe(false);
++  }
++  harness.voice = { isBusy: false, ownerKey: null };
++});
+diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
+index a486948e18..dca5752dae 100644
+--- a/apps/mobile/src/features/threads/PendingUserInputCard.tsx
++++ b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
+@@ -36,6 +36,8 @@ import {
+   type PendingUserInputDraftAnswer,
+ } from "@t3tools/client-runtime/state/pending-user-input";
+ import type { PendingUserInput } from "../../lib/threadActivity";
++import { questionAttachmentDraftKey } from "../../state/question-attachments";
++import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
+ 
+ export interface PendingUserInputCardProps {
+   readonly environmentId: EnvironmentId;
+@@ -124,6 +126,20 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+   const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
+   const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
+   const responseDisabled = !canRespond || isResponding;
++  // A dictated answer reaches the draft only when its transcript lands, so submit waits for it.
++  const voice = useGlobalVoiceInput();
++  const isDictating =
++    voice.isBusy &&
++    props.pendingUserInput.questions.some(
++      (question) =>
++        voice.ownerKey ===
++        questionAttachmentDraftKey(
++          props.environmentId,
++          props.threadId,
++          props.pendingUserInput.requestId,
++          question.id,
++        ),
++    );
+   const setDirection = markdownProseDirection(
+     props.pendingUserInput.questions
+       .flatMap((question) => [
+@@ -363,7 +379,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+         label="Submit answers"
+         fullWidth
+         tone={props.answers ? "primary" : "secondary"}
+-        disabled={!props.canOperateThread || responseDisabled || props.answers === null}
++        disabled={
++          !props.canOperateThread || responseDisabled || isDictating || props.answers === null
++        }
+         onPress={() => void props.onSubmit()}
+       />
+       {props.pendingUserInput.dismissible ? (
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
 index 3cc26c42fd..a111f635a7 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
