@@ -48,6 +48,13 @@
       "file": "patches/own/1456-notice-hold.patch",
       "check": "Start two delegated children, then let the parent finish its turn. End one child, then end the other 30 seconds later. The parent gets one notice with both task IDs. With only one child, its notice arrives at once. With another child still running, the first notice arrives after 120 seconds. Restart the server during the hold: it still delivers the notice by the original deadline, or at startup if that deadline passed. With A from parent run R1 and B and C from R2, end A, then end B 30 seconds later while C still runs. A and B notices arrive together at B's end, with no later deadline notice.",
       "dropWhen": "Upstream groups child end notices for idle parents with a hold of at most 120 seconds and restores held notices after a server restart without a database migration."
+    },
+    {
+      "id": "1467-form-draft-save",
+      "bug": 1467,
+      "file": "patches/own/1467-form-draft-save.patch",
+      "check": "Unsent answers of a T3 question form survive an app restart: choose an option and type text without sending, switch apps, force-close the app, open it again, and the form shows the same option and text. The answers are saved in user-input-drafts/drafts.json in the app documents folder. Builds on 1448-form-free-text-mic, which also changes QuestionAttachments.",
+      "dropWhen": "Upstream apps/mobile saves question form answers to disk, so userInputDraftsByRequestKeyAtom (or what replaced it) is loaded from a file at app start."
     }
   ]
 }

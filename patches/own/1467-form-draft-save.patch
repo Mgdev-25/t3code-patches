@@ -1,0 +1,383 @@
+diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+index 45b4ad2d6a..3b476a6e0f 100644
+--- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
++++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+@@ -123,6 +123,13 @@ export function QuestionAttachments(props: {
+     inputRef.current?.clear();
+     setSelection({ start: 0, end: 0 });
+   }, [props.value]);
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- an answer saved before an app restart can load after this input mounted empty; the remount shows it
++  useEffect(() => {
++    if (props.value === "" || nativeText.current !== "") return;
++    nativeText.current = props.value;
++    setInput((current) => ({ text: props.value, version: current.version + 1 }));
++    setSelection({ start: props.value.length, end: props.value.length });
++  }, [props.value]);
+   const append = (
+     key: string,
+     attachments: Parameters<typeof appendComposerDraftAttachments>[1],
+diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
+index 12b9a555e6..018511a85f 100644
+--- a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
++++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
+@@ -128,25 +128,28 @@ function setup() {
+   const focus: boolean[] = [];
+   const container = document.body.appendChild(document.createElement("div"));
+   const root = createRoot(container);
+-  act(() =>
+-    root.render(
+-      <QuestionAttachments
+-        requestId="request-1"
+-        question={question}
+-        questions={[question]}
+-        disabled={false}
+-        value=""
+-        onChangeText={(text) => changes.push(text)}
+-        onInputFocusChange={(focused) => focus.push(focused)}
+-      />,
+-    ),
+-  );
++  const render = (value: string) =>
++    act(() =>
++      root.render(
++        <QuestionAttachments
++          requestId="request-1"
++          question={question}
++          questions={[question]}
++          disabled={false}
++          value={value}
++          onChangeText={(text) => changes.push(text)}
++          onInputFocusChange={(focused) => focus.push(focused)}
++        />,
++      ),
++    );
++  render("");
+   const input = () => container.querySelector("input")!;
+   return {
+     changes,
+     focus,
+     input,
+     voice: () => harness.voice!,
++    rerender: render,
+     pressMic: () => {
+       const mic = [...container.querySelectorAll("button")].find(
+         (button) => button.textContent === "Start voice input",
+@@ -200,3 +203,14 @@ it("takes no transcript after the answer field unmounts", () => {
+   voice.onChangeDraftMessage("late");
+   expect(screen.changes).toEqual([]);
+ });
++
++it("shows an answer saved before an app restart that loads after the field mounted", () => {
++  const screen = setup();
++  expect(screen.input().value).toBe("");
++
++  screen.rerender("half typed answer");
++  expect(screen.input().value).toBe("half typed answer");
++  expect(screen.voice().readDraftMessage()).toBe("half typed answer");
++
++  screen.unmount();
++});
+diff --git a/apps/mobile/src/state/use-selected-thread-requests.ts b/apps/mobile/src/state/use-selected-thread-requests.ts
+index 776a3faf51..0ec0e7b701 100644
+--- a/apps/mobile/src/state/use-selected-thread-requests.ts
++++ b/apps/mobile/src/state/use-selected-thread-requests.ts
+@@ -34,7 +34,6 @@ import {
+   userInputDraftKey,
+ } from "@t3tools/client-runtime/state/thread-requests";
+ import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+-import { Atom } from "effect/reactivity";
+ 
+ import { environmentThreadDetails, threadEnvironment } from "./threads";
+ import {
+@@ -48,12 +47,15 @@ import { useSelectedThreadPendingRequests } from "./use-thread-detail";
+ import { useThreadSelection } from "./use-thread-selection";
+ import { useAtomCommand } from "./use-atom-command";
+ import { readEnvironmentScope } from "./session";
++import {
++  loadUserInputDrafts,
++  setUserInputDrafts,
++  userInputDraftsByRequestKeyAtom,
++} from "./user-input-drafts";
+ 
+ const EMPTY_PENDING_REQUESTS: PendingThreadRequests = { approvals: [], userInputs: [] };
+ 
+-const userInputDraftsByRequestKeyAtom = Atom.make<
+-  Record<string, Record<string, PendingUserInputDraftAnswer>>
+->({}).pipe(Atom.keepAlive, Atom.withLabel("mobile:user-input-drafts"));
++void loadUserInputDrafts();
+ 
+ // Writes start from the suggested answer the user was looking at.
+ function seededDraft(
+@@ -69,7 +71,7 @@ function setUserInputDraftOption(
+   value: string,
+ ): void {
+   const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
+-  appAtomRegistry.set(userInputDraftsByRequestKeyAtom, {
++  setUserInputDrafts({
+     ...current,
+     [requestKey]: {
+       ...current[requestKey],
+@@ -88,7 +90,7 @@ function setUserInputDraftCustomAnswer(
+   customAnswer: string,
+ ): void {
+   const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
+-  appAtomRegistry.set(userInputDraftsByRequestKeyAtom, {
++  setUserInputDrafts({
+     ...current,
+     [requestKey]: {
+       ...current[requestKey],
+@@ -114,7 +116,7 @@ function pruneResolvedRequestDrafts(
+     threadId,
+     pendingRequestIds,
+   );
+-  if (prunedDrafts !== drafts) appAtomRegistry.set(userInputDraftsByRequestKeyAtom, prunedDrafts);
++  if (prunedDrafts !== drafts) setUserInputDrafts(prunedDrafts);
+ 
+   const prefix = questionAttachmentDraftPrefix(environmentId, threadId);
+   const attachmentDrafts = appAtomRegistry.get(questionAttachmentDraftsAtom(prefix));
+diff --git a/apps/mobile/src/state/user-input-drafts.test.ts b/apps/mobile/src/state/user-input-drafts.test.ts
+new file mode 100644
+index 0000000000..15292c33fe
+--- /dev/null
++++ b/apps/mobile/src/state/user-input-drafts.test.ts
+@@ -0,0 +1,116 @@
++import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
++
++const disk = vi.hoisted(() => new Map<string, string>());
++
++vi.mock("expo-file-system", () => {
++  class Directory {
++    readonly uri: string;
++    constructor(parent: { readonly uri: string }, name: string) {
++      this.uri = `${parent.uri}/${name}`;
++    }
++    create(): void {}
++  }
++  class File {
++    readonly uri: string;
++    constructor(parent: { readonly uri: string }, name: string) {
++      this.uri = `${parent.uri}/${name}`;
++    }
++    get exists(): boolean {
++      return disk.has(this.uri);
++    }
++    async text(): Promise<string> {
++      return disk.get(this.uri) ?? "";
++    }
++  }
++  return { Directory, File, Paths: { document: { uri: "file:///documents" } } };
++});
++
++vi.mock("../lib/atomic-file", () => ({
++  writeFileAtomically: async (file: { readonly uri: string }, contents: string) => {
++    disk.set(file.uri, contents);
++  },
++}));
++
++const DRAFTS_URI = "file:///documents/user-input-drafts/drafts.json";
++
++/** A fresh copy of the module and its registry, as after an app restart. */
++async function startApp() {
++  vi.resetModules();
++  const drafts = await import("./user-input-drafts");
++  const { appAtomRegistry } = await import("./atom-registry");
++  return {
++    ...drafts,
++    read: () => appAtomRegistry.get(drafts.userInputDraftsByRequestKeyAtom),
++  };
++}
++
++describe("user input drafts", () => {
++  beforeEach(() => {
++    disk.clear();
++  });
++
++  it("keeps the chosen options and typed text across an app restart", async () => {
++    const first = await startApp();
++    await first.loadUserInputDrafts();
++    first.setUserInputDrafts({
++      "request-1": {
++        color: { selectedOptionValues: ["blue"] },
++        note: { customAnswer: "half typed answer" },
++      },
++    });
++    await vi.waitFor(() => expect(disk.has(DRAFTS_URI)).toBe(true));
++
++    const second = await startApp();
++    expect(second.read()).toEqual({});
++    await second.loadUserInputDrafts();
++    expect(second.read()).toEqual({
++      "request-1": {
++        color: { selectedOptionValues: ["blue"] },
++        note: { customAnswer: "half typed answer" },
++      },
++    });
++  });
++
++  it("saves a pruned request as removed", async () => {
++    const first = await startApp();
++    await first.loadUserInputDrafts();
++    first.setUserInputDrafts({ "request-1": { note: { customAnswer: "a" } } });
++    first.setUserInputDrafts({});
++    await vi.waitFor(() =>
++      expect(JSON.parse(disk.get(DRAFTS_URI) ?? "null")).toEqual({ schemaVersion: 1, drafts: {} }),
++    );
++
++    const second = await startApp();
++    await second.loadUserInputDrafts();
++    expect(second.read()).toEqual({});
++  });
++
++  it("keeps an answer edited before the saved answers finish loading", async () => {
++    disk.set(
++      DRAFTS_URI,
++      JSON.stringify({
++        schemaVersion: 1,
++        drafts: {
++          "request-1": { color: { selectedOptionValues: ["blue"] }, note: { customAnswer: "old" } },
++        },
++      }),
++    );
++    const app = await startApp();
++    const loading = app.loadUserInputDrafts();
++    app.setUserInputDrafts({ "request-1": { note: { customAnswer: "new" } } });
++    await loading;
++    expect(app.read()).toEqual({
++      "request-1": { color: { selectedOptionValues: ["blue"] }, note: { customAnswer: "new" } },
++    });
++  });
++
++  it("drops a damaged saved file and keeps working", async () => {
++    disk.set(DRAFTS_URI, "{not json");
++    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
++    const app = await startApp();
++    await app.loadUserInputDrafts();
++    expect(app.read()).toEqual({});
++    expect(warn).toHaveBeenCalled();
++    warn.mockRestore();
++  });
++});
+diff --git a/apps/mobile/src/state/user-input-drafts.ts b/apps/mobile/src/state/user-input-drafts.ts
+new file mode 100644
+index 0000000000..bfe2b6f71a
+--- /dev/null
++++ b/apps/mobile/src/state/user-input-drafts.ts
+@@ -0,0 +1,118 @@
++import type { PendingUserInputDraftAnswer } from "@t3tools/client-runtime/state/pending-user-input";
++import { Atom } from "effect/reactivity";
++
++import { writeFileAtomically } from "../lib/atomic-file";
++import { SerializedAsyncQueue } from "../lib/serialized-async-queue";
++import { appAtomRegistry } from "./atom-registry";
++
++/** Edited question answers by `userInputDraftKey`, then by question ID. */
++export type UserInputDrafts = Record<string, Record<string, PendingUserInputDraftAnswer>>;
++
++const USER_INPUT_DRAFTS_SCHEMA_VERSION = 1;
++const USER_INPUT_DRAFTS_DIRECTORY = "user-input-drafts";
++const USER_INPUT_DRAFTS_FILE = "drafts.json";
++const SAVE_DEBOUNCE_MS = 200;
++
++// Saved to disk: Android can stop the app in the background, and the server only keeps
++// the open question, not the unsent answers.
++export const userInputDraftsByRequestKeyAtom = Atom.make<UserInputDrafts>({}).pipe(
++  Atom.keepAlive,
++  Atom.withLabel("mobile:user-input-drafts"),
++);
++
++const saveQueue = new SerializedAsyncQueue();
++let saveTimer: ReturnType<typeof setTimeout> | null = null;
++let loadPromise: Promise<void> | null = null;
++
++async function getUserInputDraftsFile() {
++  const { Directory, File, Paths } = await import("expo-file-system");
++  const directory = new Directory(Paths.document, USER_INPUT_DRAFTS_DIRECTORY);
++  directory.create({ idempotent: true, intermediates: true });
++  return new File(directory, USER_INPUT_DRAFTS_FILE);
++}
++
++function decodeDraftAnswer(value: unknown): PendingUserInputDraftAnswer | null {
++  if (typeof value !== "object" || value === null) return null;
++  const { selectedOptionValues, customAnswer } = value as Record<string, unknown>;
++  const options =
++    Array.isArray(selectedOptionValues) &&
++    selectedOptionValues.every((option) => typeof option === "string")
++      ? (selectedOptionValues as string[])
++      : undefined;
++  const text = typeof customAnswer === "string" ? customAnswer : undefined;
++  if (options === undefined && text === undefined) return null;
++  return {
++    ...(options !== undefined ? { selectedOptionValues: options } : {}),
++    ...(text !== undefined ? { customAnswer: text } : {}),
++  };
++}
++
++/** Keeps each well-formed answer of a saved document and drops the rest. */
++function decodeUserInputDrafts(document: unknown): UserInputDrafts {
++  if (typeof document !== "object" || document === null) return {};
++  const { schemaVersion, drafts } = document as Record<string, unknown>;
++  if (schemaVersion !== USER_INPUT_DRAFTS_SCHEMA_VERSION) return {};
++  if (typeof drafts !== "object" || drafts === null) return {};
++  const decoded: UserInputDrafts = {};
++  for (const [requestKey, answers] of Object.entries(drafts)) {
++    if (typeof answers !== "object" || answers === null) continue;
++    const requestDrafts: Record<string, PendingUserInputDraftAnswer> = {};
++    for (const [questionId, answer] of Object.entries(answers)) {
++      const draft = decodeDraftAnswer(answer);
++      if (draft) requestDrafts[questionId] = draft;
++    }
++    if (Object.keys(requestDrafts).length > 0) decoded[requestKey] = requestDrafts;
++  }
++  return decoded;
++}
++
++/**
++ * Reads the saved answers once per app start. An answer edited before the read ends wins
++ * over its saved copy. A request that resolved meanwhile is pruned again by the next
++ * resolution notice of its thread.
++ */
++export function loadUserInputDrafts(): Promise<void> {
++  loadPromise ??= (async () => {
++    try {
++      const file = await getUserInputDraftsFile();
++      if (!file.exists) return;
++      const saved = decodeUserInputDrafts(JSON.parse(await file.text()) as unknown);
++      const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
++      const merged: UserInputDrafts = { ...saved };
++      for (const [requestKey, answers] of Object.entries(current)) {
++        merged[requestKey] = { ...saved[requestKey], ...answers };
++      }
++      appAtomRegistry.set(userInputDraftsByRequestKeyAtom, merged);
++    } catch (error) {
++      console.warn("[user-input-drafts] could not read saved answers", error);
++    }
++  })();
++  return loadPromise;
++}
++
++async function saveUserInputDrafts(): Promise<void> {
++  // A write before the read would replace the saved answers with this start's partial state.
++  await loadUserInputDrafts();
++  try {
++    const file = await getUserInputDraftsFile();
++    await writeFileAtomically(
++      file,
++      JSON.stringify({
++        schemaVersion: USER_INPUT_DRAFTS_SCHEMA_VERSION,
++        drafts: appAtomRegistry.get(userInputDraftsByRequestKeyAtom),
++      }),
++    );
++  } catch (error) {
++    console.warn("[user-input-drafts] could not save answers", error);
++  }
++}
++
++/** Replaces the answers and saves them after a short debounce. */
++export function setUserInputDrafts(next: UserInputDrafts): void {
++  appAtomRegistry.set(userInputDraftsByRequestKeyAtom, next);
++  if (saveTimer !== null) clearTimeout(saveTimer);
++  saveTimer = setTimeout(() => {
++    saveTimer = null;
++    void saveQueue.run(saveUserInputDrafts);
++  }, SAVE_DEBOUNCE_MS);
++}
