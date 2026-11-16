@@ -39,7 +39,7 @@
       "id": "1448-form-free-text-mic",
       "bug": 1448,
       "file": "patches/own/1448-form-free-text-mic.patch",
-      "check": "A T3 question form with a free-text answer shows the composer mic button next to the field. A dictated answer lands in the field with the dictionary word and cleanup of the composer. The one feature in this list: Morgan allowed it on 2026-11-16 in Shell issue 1448.",
+      "check": "A T3 question form with a free-text answer shows the composer mic button inside the answer box. A dictated answer lands in the field with the dictionary word and cleanup of the composer. The one feature in this list: Morgan allowed it on 2026-11-16 in Shell issue 1448.",
       "dropWhen": "The upstream QuestionAttachments of the tag already calls useVoiceInputController for the free-text answer."
     }
   ]
