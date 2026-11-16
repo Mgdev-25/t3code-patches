@@ -32,7 +32,7 @@
       "id": "1409-server-voice-settings",
       "bug": 1409,
       "file": "patches/own/1409-server-voice-settings.patch",
-      "check": "With a Project dictionary alias and a cleanup model on the server, phone dictation inserts the dictionary term and cleaned text. Steps: own-patches/1409-server-voice-settings/report.md of Shell issue 1411.",
+      "check": "With a Project dictionary alias and a cleanup model on the server, phone dictation inserts the dictionary term and cleaned text. A recording keeps going through the usage refresh of the server (Shell issue 1453). Steps: own-patches/1409-server-voice-settings/report.md of Shell issue 1411.",
       "dropWhen": "Upstream phone voice input sends speechProjectCustomWords and calls postProcess for an environment destination."
     },
     {
