@@ -1,0 +1,509 @@
+diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
+index 8dcfb78747..e6baec4ea1 100644
+--- a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
++++ b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
+@@ -9,6 +9,7 @@ import type { PendingUserInput } from "../../lib/threadActivity";
+ const harness = vi.hoisted(() => ({
+   navigate: [] as Array<[string, object | undefined]>,
+   openedUrls: [] as string[],
++  voice: { isBusy: false, ownerKey: null as string | null },
+ }));
+ 
+ type Children = { children?: ReactNode };
+@@ -37,7 +38,19 @@ vi.mock("../../components/ui/AppText", () => ({
+   AppText: ({ children }: Children) => <span>{children}</span>,
+ }));
+ vi.mock("../../components/ui/ControlPill", () => ({ ControlPill: () => null }));
+-vi.mock("../../components/ui/Button", () => ({ Button: () => null }));
++vi.mock("../../components/ui/Button", () => ({
++  Button: (props: { label: string; disabled?: boolean }) => (
++    <button type="button" disabled={props.disabled}>
++      {props.label}
++    </button>
++  ),
++}));
++vi.mock("../voice-input/VoiceInputProvider", () => ({
++  useGlobalVoiceInput: () => harness.voice,
++}));
++vi.mock("../../state/question-attachments", () => ({
++  questionAttachmentDraftKey: (...parts: string[]) => parts.join(":"),
++}));
+ vi.mock("./QuestionAttachments", () => ({ QuestionAttachments: () => null }));
+ vi.mock("../files/FileMarkdownPreview", () => ({
+   useMarkdownPreviewStyles: () => ({ nativeTextStyle: {} }),
+@@ -104,7 +117,7 @@ function setup(questionMarkdown: string) {
+         collapsed={false}
+         onToggleCollapsed={() => {}}
+         drafts={{}}
+-        answers={null}
++        answers={{ "question-1": "First" }}
+         respondingUserInputId={null}
+         onSelectOption={() => {}}
+         onChangeCustomAnswer={() => {}}
+@@ -114,6 +127,10 @@ function setup(questionMarkdown: string) {
+     ),
+   );
+   return {
++    submitDisabled: () =>
++      [...container.querySelectorAll("button")].find(
++        (button) => button.textContent === "Submit answers",
++      )!.disabled,
+     async pressLink(label: string) {
+       const link = [...container.querySelectorAll("button")].find(
+         (button) => button.textContent === label,
+@@ -140,3 +157,17 @@ it("opens a workspace file link in a question in the thread's file viewer", asyn
+     ],
+   ]);
+ });
++
++it("holds the submit while an answer of this form is dictated", () => {
++  harness.voice = { isBusy: true, ownerKey: "env-1:thread-1:request-1:question-1" };
++  {
++    using screen = setup("Which path?");
++    expect(screen.submitDisabled()).toBe(true);
++  }
++  harness.voice = { isBusy: true, ownerKey: "composer-draft" };
++  {
++    using screen = setup("Which path?");
++    expect(screen.submitDisabled()).toBe(false);
++  }
++  harness.voice = { isBusy: false, ownerKey: null };
++});
+diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
+index a486948e18..dca5752dae 100644
+--- a/apps/mobile/src/features/threads/PendingUserInputCard.tsx
++++ b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
+@@ -36,6 +36,8 @@ import {
+   type PendingUserInputDraftAnswer,
+ } from "@t3tools/client-runtime/state/pending-user-input";
+ import type { PendingUserInput } from "../../lib/threadActivity";
++import { questionAttachmentDraftKey } from "../../state/question-attachments";
++import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
+ 
+ export interface PendingUserInputCardProps {
+   readonly environmentId: EnvironmentId;
+@@ -124,6 +126,20 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+   const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
+   const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
+   const responseDisabled = !canRespond || isResponding;
++  // A dictated answer reaches the draft only when its transcript lands, so submit waits for it.
++  const voice = useGlobalVoiceInput();
++  const isDictating =
++    voice.isBusy &&
++    props.pendingUserInput.questions.some(
++      (question) =>
++        voice.ownerKey ===
++        questionAttachmentDraftKey(
++          props.environmentId,
++          props.threadId,
++          props.pendingUserInput.requestId,
++          question.id,
++        ),
++    );
+   const setDirection = markdownProseDirection(
+     props.pendingUserInput.questions
+       .flatMap((question) => [
+@@ -363,7 +379,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+         label="Submit answers"
+         fullWidth
+         tone={props.answers ? "primary" : "secondary"}
+-        disabled={!props.canOperateThread || responseDisabled || props.answers === null}
++        disabled={
++          !props.canOperateThread || responseDisabled || isDictating || props.answers === null
++        }
+         onPress={() => void props.onSubmit()}
+       />
+       {props.pendingUserInput.dismissible ? (
+diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+index 3cc26c42fd..a111f635a7 100644
+--- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
++++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+@@ -29,6 +29,17 @@ import {
+   questionAttachmentDraftKey,
+   questionAttachmentPreparationAtom,
+ } from "../../state/question-attachments";
++import type { ComposerEditorSelection } from "../../components/ComposerEditor";
++import {
++  ComposerDictationCancelAction,
++  ComposerDictationError,
++  ComposerDictationPrimaryAction,
++  ComposerDictationStartAction,
++  ComposerDictationStatus,
++  ComposerDictationToolbar,
++} from "../voice-input/ComposerDictationControl";
++import { useVoiceInputController } from "../voice-input/useVoiceInputController";
++import { resolveVoiceComposerPresentation } from "../voice-input/voiceInputPresentation";
+ 
+ export function QuestionAttachments(props: {
+   requestId: string;
+@@ -65,16 +76,52 @@ export function QuestionAttachments(props: {
+   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases keyboard ownership on unmount, since an unmounted native input never emits blur
+   useEffect(() => () => releaseFocus(), []);
+   // A controlled value makes Fabric rebuild the native text on every keystroke, which discards
+-  // iOS's pending autocorrection. The input owns its text; the only outside write is an option
+-  // selection clearing the draft.
++  // iOS's pending autocorrection. The input owns its text. The outside writes are an option
++  // selection clearing the draft, and dictation, which remounts the input with the new text.
+   const inputRef = useRef<TextInputInstance>(null);
+-  const [initialText] = useState(props.value);
++  const [input, setInput] = useState(() => ({ text: props.value, version: 0 }));
+   const nativeText = useRef(props.value);
++  const [selection, setSelection] = useState<ComposerEditorSelection>(() => ({
++    start: props.value.length,
++    end: props.value.length,
++  }));
++  // The same mic, voice route, dictionary and cleanup as the thread composer.
++  const voice = useVoiceInputController({
++    ownerKey:
++      selectedThread && props.question.allowCustomAnswer !== false
++        ? questionAttachmentDraftKey(
++            selectedThread.environmentId,
++            selectedThread.id,
++            props.requestId,
++            props.question.id,
++          )
++        : null,
++    label: props.question.header,
++    selection,
++    // An unmounted answer field takes no transcript.
++    readDraftMessage: () => (pickerScope.current.active ? nativeText.current : null),
++    onChangeDraftMessage: (text) => {
++      if (!pickerScope.current.active) return;
++      // The remount drops the old input with no blur event, so release keyboard ownership here.
++      if (focusedRef.current) {
++        focusedRef.current = false;
++        onInputFocusChange?.(false);
++      }
++      nativeText.current = text;
++      setInput((current) => ({ text, version: current.version + 1 }));
++      props.onChangeText(text);
++    },
++    onChangeSelection: setSelection,
++    disabled: props.disabled,
++  });
++  const voicePresentation = resolveVoiceComposerPresentation(voice.state, voice.elapsedSeconds);
++  const showsDictation = voicePresentation.statusKind === "active";
+   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes an option selection's cleared draft into the uncontrolled native input
+   useEffect(() => {
+     if (props.value !== "" || nativeText.current === "") return;
+     nativeText.current = "";
+     inputRef.current?.clear();
++    setSelection({ start: 0, end: 0 });
+   }, [props.value]);
+   const append = (
+     key: string,
+@@ -205,29 +252,71 @@ export function QuestionAttachments(props: {
+       />
+       <FilePreviewModal source={previewFile} onRequestClose={() => setPreviewFile(null)} />
+       <VideoPreviewModal source={previewVideo} onRequestClose={() => setPreviewVideo(null)} />
+-      <TextInputWrapper onPaste={paste}>
+-        <TextInput
+-          ref={inputRef}
+-          defaultValue={initialText}
+-          multiline={props.question.initialAnswer !== undefined}
+-          submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
+-          editable={!props.disabled}
+-          onChangeText={(text) => {
+-            nativeText.current = text;
+-            props.onChangeText(text);
+-          }}
+-          onFocus={() => {
+-            focusedRef.current = true;
+-            onInputFocusChange?.(true);
+-          }}
+-          onBlur={() => {
+-            focusedRef.current = false;
+-            onInputFocusChange?.(false);
+-          }}
+-          placeholder="Or type a custom answer"
+-          className="min-h-[54px] rounded-2xl border border-input-border bg-input px-3.5 py-3 font-sans text-base text-foreground"
+-        />
+-      </TextInputWrapper>
++      <View className="flex-row items-end gap-1">
++        <TextInputWrapper onPaste={paste} style={{ flex: 1, minWidth: 0 }}>
++          <TextInput
++            key={input.version}
++            ref={inputRef}
++            defaultValue={input.text}
++            multiline={props.question.initialAnswer !== undefined}
++            submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
++            editable={!props.disabled && !voice.freezesEditor}
++            onChangeText={(text) => {
++              nativeText.current = text;
++              props.onChangeText(text);
++            }}
++            onSelectionChange={({ nativeEvent }) => setSelection(nativeEvent.selection)}
++            onFocus={() => {
++              focusedRef.current = true;
++              onInputFocusChange?.(true);
++            }}
++            onBlur={() => {
++              focusedRef.current = false;
++              onInputFocusChange?.(false);
++            }}
++            placeholder="Or type a custom answer"
++            className="min-h-[54px] rounded-2xl border border-input-border bg-input px-3.5 py-3 font-sans text-base text-foreground"
++          />
++        </TextInputWrapper>
++        {voice.isAvailable && !showsDictation ? (
++          <ComposerDictationStartAction
++            state={voice.state}
++            isAvailable={voice.isAvailable}
++            disabled={props.disabled}
++            onStart={voice.start}
++            onCancel={voice.cancel}
++          />
++        ) : null}
++      </View>
++      <ComposerDictationError
++        error={voice.state.phase === "error" ? voice.state.error : null}
++        onDismiss={voice.cancel}
++      />
++      {showsDictation ? (
++        <ComposerDictationToolbar showsDictation>
++          <View className="h-11 flex-row items-center">
++            <ComposerDictationCancelAction
++              presentation={voicePresentation}
++              onCancel={voice.cancel}
++            />
++            <ComposerDictationStatus
++              audioLevels={voice.audioLevels}
++              elapsedSeconds={voice.elapsedSeconds}
++              phase={voice.state.phase}
++              presentation={voicePresentation}
++            />
++            <ComposerDictationPrimaryAction
++              state={voice.state}
++              presentation={voicePresentation}
++              isAvailable={voice.isAvailable}
++              disabled={props.disabled}
++              onStart={voice.start}
++              onConfirm={voice.stop}
++              onCancel={voice.cancel}
++            />
++          </View>
++        </ComposerDictationToolbar>
++      ) : null}
+     </View>
+   );
+ }
+diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
+new file mode 100644
+index 0000000000..12b9a555e6
+--- /dev/null
++++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
+@@ -0,0 +1,202 @@
++import type { UserInputQuestion } from "@t3tools/contracts";
++import type { ReactNode } from "react";
++import { act, forwardRef } from "react";
++import { createRoot } from "react-dom/client";
++import { expect, it, vi } from "vite-plus/test";
++
++type VoiceInput = {
++  readonly ownerKey: string | null;
++  readonly readDraftMessage: () => string | null;
++  readonly selection: { start: number; end: number };
++  readonly onChangeDraftMessage: (text: string) => void;
++};
++
++const harness = vi.hoisted(() => ({
++  voice: null as VoiceInput | null,
++  started: 0,
++}));
++
++type Children = { children?: ReactNode };
++
++vi.mock("react-native", () => ({
++  View: ({ children }: Children) => <div>{children}</div>,
++}));
++vi.mock("expo-paste-input", () => ({
++  TextInputWrapper: ({ children }: Children) => <div>{children}</div>,
++}));
++vi.mock("../../components/ui/AppText", () => ({
++  AppTextInput: forwardRef<
++    HTMLInputElement,
++    {
++      defaultValue: string;
++      editable: boolean;
++      onChangeText: (text: string) => void;
++      onSelectionChange: (event: {
++        nativeEvent: { selection: { start: number; end: number } };
++      }) => void;
++      onFocus: () => void;
++      onBlur: () => void;
++    }
++  >((props, ref) => (
++    <input
++      ref={ref}
++      aria-label="answer"
++      defaultValue={props.defaultValue}
++      readOnly={!props.editable}
++      onFocus={props.onFocus}
++      onBlur={props.onBlur}
++      onChange={(event) => {
++        props.onChangeText(event.target.value);
++        const end = event.target.value.length;
++        props.onSelectionChange({ nativeEvent: { selection: { start: end, end } } });
++      }}
++    />
++  )),
++}));
++vi.mock("../../components/ui/Dialog", () => ({ alert: () => {} }));
++vi.mock("../../lib/useNativePaste", () => ({ useNativePaste: () => () => {} }));
++vi.mock("../../lib/composerImages", () => ({}));
++vi.mock("@effect/atom-react", () => ({ useAtomValue: () => ({}) }));
++vi.mock("./ComposerAttachmentButton", () => ({ ComposerAttachmentButton: () => null }));
++vi.mock("../../components/ComposerAttachmentStrip", () => ({
++  ComposerAttachmentStrip: () => null,
++}));
++vi.mock("../../components/ui/FilePreviewModal", () => ({ FilePreviewModal: () => null }));
++vi.mock("../../components/ui/VideoPreviewModal", () => ({ VideoPreviewModal: () => null }));
++vi.mock("@react-navigation/native", () => ({ useNavigation: () => ({}) }));
++vi.mock("../../state/use-thread-selection", () => ({
++  useThreadSelection: () => ({ selectedThread: { environmentId: "env-1", id: "thread-1" } }),
++}));
++vi.mock("../../state/entities", () => ({ useServerConfigs: () => new Map() }));
++vi.mock("../../state/atom-registry", () => ({ appAtomRegistry: { get: () => ({}) } }));
++vi.mock("../../state/use-composer-drafts", () => ({
++  composerDraftsAtom: {},
++  appendComposerDraftAttachments: () => 0,
++  removeComposerDraftAttachment: () => {},
++  releaseUnusedComposerAttachmentFiles: async () => {},
++}));
++vi.mock("../../state/question-attachments", () => ({
++  changeQuestionAttachmentPreparation: () => {},
++  questionAttachmentPreparationAtom: {},
++  questionAttachmentDraftKey: (...parts: string[]) => parts.join(":"),
++}));
++vi.mock("../voice-input/voiceInputPresentation", () => ({
++  resolveVoiceComposerPresentation: () => ({ statusKind: "idle" }),
++}));
++vi.mock("../voice-input/ComposerDictationControl", () => ({
++  ComposerDictationStartAction: (props: { onStart: () => void }) => (
++    <button type="button" onClick={props.onStart}>
++      Start voice input
++    </button>
++  ),
++  ComposerDictationError: () => null,
++  ComposerDictationToolbar: () => null,
++  ComposerDictationCancelAction: () => null,
++  ComposerDictationStatus: () => null,
++  ComposerDictationPrimaryAction: () => null,
++}));
++vi.mock("../voice-input/useVoiceInputController", () => ({
++  useVoiceInputController: (input: VoiceInput) => {
++    harness.voice = input;
++    return {
++      isAvailable: true,
++      state: { phase: "idle", error: null, errorAction: null },
++      audioLevels: { value: [] },
++      elapsedSeconds: 0,
++      freezesEditor: false,
++      start: () => harness.started++,
++      stop: () => {},
++      cancel: () => {},
++    };
++  },
++}));
++
++import { QuestionAttachments } from "./QuestionAttachments";
++
++function setup() {
++  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
++  harness.voice = null;
++  harness.started = 0;
++  const question = {
++    id: "question-1",
++    header: "Answer",
++    question: "Type your answer",
++    options: [],
++    multiSelect: false,
++  } as UserInputQuestion;
++  const changes: string[] = [];
++  const focus: boolean[] = [];
++  const container = document.body.appendChild(document.createElement("div"));
++  const root = createRoot(container);
++  act(() =>
++    root.render(
++      <QuestionAttachments
++        requestId="request-1"
++        question={question}
++        questions={[question]}
++        disabled={false}
++        value=""
++        onChangeText={(text) => changes.push(text)}
++        onInputFocusChange={(focused) => focus.push(focused)}
++      />,
++    ),
++  );
++  const input = () => container.querySelector("input")!;
++  return {
++    changes,
++    focus,
++    input,
++    voice: () => harness.voice!,
++    pressMic: () => {
++      const mic = [...container.querySelectorAll("button")].find(
++        (button) => button.textContent === "Start voice input",
++      );
++      if (!mic) throw new Error("No mic button");
++      act(() => mic.click());
++    },
++    type: (text: string) => {
++      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
++      act(() => {
++        setValue.call(input(), text);
++        input().dispatchEvent(new Event("input", { bubbles: true }));
++      });
++    },
++    unmount: () => {
++      act(() => root.unmount());
++      container.remove();
++    },
++  };
++}
++
++it("dictates into the free-text answer of a question", () => {
++  const screen = setup();
++
++  screen.pressMic();
++  expect(harness.started).toBe(1);
++  expect(screen.voice().ownerKey).toBe("env-1:thread-1:request-1:question-1");
++
++  act(() => screen.input().focus());
++  screen.type("Check ");
++  expect(screen.voice().readDraftMessage()).toBe("Check ");
++  expect(screen.voice().selection).toEqual({ start: 6, end: 6 });
++
++  act(() => screen.voice().onChangeDraftMessage("Check Selkies."));
++  expect(screen.input().value).toBe("Check Selkies.");
++  expect(screen.changes.at(-1)).toBe("Check Selkies.");
++  expect(screen.voice().readDraftMessage()).toBe("Check Selkies.");
++  // The new input is not focused, so the card must not keep the keyboard.
++  expect(screen.focus).toEqual([true, false]);
++
++  screen.unmount();
++});
++
++it("takes no transcript after the answer field unmounts", () => {
++  const screen = setup();
++  const voice = screen.voice();
++
++  screen.unmount();
++
++  expect(voice.readDraftMessage()).toBeNull();
++  voice.onChangeDraftMessage("late");
++  expect(screen.changes).toEqual([]);
++});
+diff --git a/apps/mobile/vite.config.ts b/apps/mobile/vite.config.ts
+index e9f1260b51..38b9c10d05 100644
+--- a/apps/mobile/vite.config.ts
++++ b/apps/mobile/vite.config.ts
+@@ -33,6 +33,7 @@ const reactTests = [
+   "src/components/ui/FilePreviewSession.test.tsx",
+   "src/features/threads/UsageLimitRecoveryCard.test.tsx",
+   "src/features/threads/PendingUserInputCard.test.tsx",
++  "src/features/threads/QuestionAttachments.voice.test.tsx",
+   "src/features/threads/NewTaskDraftRouteScreen.test.tsx",
+   "src/native/NativeHeaderToolbar.test.tsx",
+   "src/components/ComposerEditor.ios.test.tsx",
