@@ -20,7 +20,7 @@ index 6e891dd04e..0fef0a8942 100644
        const route = registry.get(voiceRouteAtom);
        if (route) return route.transcriber;
 diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
-index a6f48d6959..14756f1225 100644
+index a6f48d6959..031f9d1d58 100644
 --- a/apps/mobile/src/features/voice-input/voiceDestination.ts
 +++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
 @@ -3,6 +3,7 @@ import {
@@ -43,20 +43,24 @@ index a6f48d6959..14756f1225 100644
    prepared: PreparedConnection,
    canSend: () => boolean,
    speechLanguage: string,
-+  speechCustomWords: SpeechCustomWords,
++  readSpeechCustomWords: () => SpeechCustomWords,
    cloud?: CloudDestination,
  ) {
    const provider = cloud?.provider;
-@@ -193,7 +196,7 @@ function environmentTranscriber(
+@@ -193,7 +196,11 @@ function environmentTranscriber(
              : transcribeEnvironmentPcm(
                  prepared,
                  pcm,
 -                { ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, speechLanguage },
-+                { ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, speechLanguage, speechCustomWords },
++                {
++                  ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
++                  speechLanguage,
++                  speechCustomWords: readSpeechCustomWords(),
++                },
                  canSend,
                ),
            signal,
-@@ -203,6 +206,37 @@ function environmentTranscriber(
+@@ -203,6 +210,37 @@ function environmentTranscriber(
    });
  }
  
@@ -94,36 +98,40 @@ index a6f48d6959..14756f1225 100644
  const speechAtom = <A, E>(
    id: EnvironmentId,
    read: (prepared: PreparedConnection) => Effect.Effect<A, E, HttpClient.HttpClient>,
-@@ -256,6 +290,10 @@ export const voiceRouteAtom = Atom.make((get) => {
-   );
+@@ -257,6 +295,13 @@ export const voiceRouteAtom = Atom.make((get) => {
    const connection = get(connectionAtom);
    const speechLanguage = get(speechLanguageAtom);
-+  const speechCustomWords = cloud
-+    ? []
-+    : (get(environmentPresentations.presentationAtom(grant.destination.environmentId))?.serverConfig
-+        ?.settings?.speechProjectCustomWords ?? []);
    const registry = get.registry;
++  // Read when the recording is sent: a new route cancels the recording in progress, so the
++  // route must not change on each server config event.
++  const readSpeechCustomWords = (): SpeechCustomWords =>
++    cloud
++      ? []
++      : (registry.get(environmentPresentations.presentationAtom(grant.destination.environmentId))
++          ?.serverConfig?.settings?.speechProjectCustomWords ?? []);
    return {
      transcriber:
-@@ -264,6 +302,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+       connection &&
+@@ -264,6 +309,7 @@ export const voiceRouteAtom = Atom.make((get) => {
          connection,
          () => registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection,
          speechLanguage,
-+        speechCustomWords,
++        readSpeechCustomWords,
          cloud,
        ),
    };
 diff --git a/apps/mobile/src/features/voice-input/voiceServerSettings.test.ts b/apps/mobile/src/features/voice-input/voiceServerSettings.test.ts
 new file mode 100644
-index 0000000000..48af478f90
+index 0000000000..4c9798b2c3
 --- /dev/null
 +++ b/apps/mobile/src/features/voice-input/voiceServerSettings.test.ts
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,219 @@
 +import { EnvironmentId, type SpeechCustomWords } from "@t3tools/contracts";
 +import * as Effect from "effect/Effect";
 +import { Atom, AsyncResult } from "effect/reactivity";
 +import { beforeEach, expect, it, vi } from "vite-plus/test";
 +import { appAtomRegistry } from "../../state/atom-registry";
++import { environmentPresentations } from "../../state/presentation";
 +import {
 +  VoiceInputController,
 +  resetVoiceInputGlobalsForTests,
@@ -305,6 +313,35 @@ index 0000000000..48af478f90
 +    expect(commitDraft.mock.calls[0]?.[0]).toBe("please check shell bug");
 +  } finally {
 +    controller.dispose();
++    unmount();
++  }
++});
++
++it("keeps the recording route when the server config changes, and sends the newest dictionary", async () => {
++  chooseVoiceDestination(EnvironmentId.make("cleanup-on"));
++  const unmount = appAtomRegistry.mount(voiceRouteAtom);
++  try {
++    const route = appAtomRegistry.get(voiceRouteAtom);
++    // The mock presentation is a writable atom. A config event decodes a new settings object.
++    const presentation = environmentPresentations.presentationAtom(
++      EnvironmentId.make("cleanup-on"),
++    ) as unknown as Atom.Writable<{ serverConfig: { settings: object } }>;
++    const current = appAtomRegistry.get(presentation);
++    const newWords: SpeechCustomWords = [{ term: "Selkies", aliases: ["sell keys"] }];
++    appAtomRegistry.set(presentation, {
++      ...current,
++      serverConfig: {
++        ...current.serverConfig,
++        settings: { ...current.serverConfig.settings, speechProjectCustomWords: newWords },
++      },
++    });
++    // A new route cancels the recording in progress, so the route must stay the same.
++    expect(appAtomRegistry.get(voiceRouteAtom)).toBe(route);
++    const options = { signal: new AbortController().signal };
++    const recording = await route!.transcriber!.prepare(options);
++    await recording.transcribe("file:///voice.m4a", options);
++    expect(mocks.transcribe.mock.calls[0]?.[2]).toMatchObject({ speechCustomWords: newWords });
++  } finally {
 +    unmount();
 +  }
 +});
