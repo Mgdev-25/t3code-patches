@@ -1,14 +1,31 @@
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 45b4ad2d6a..3b476a6e0f 100644
+index 45b4ad2d6a..adffaceeea 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-@@ -123,6 +123,13 @@ export function QuestionAttachments(props: {
+@@ -81,6 +81,8 @@ export function QuestionAttachments(props: {
+   const inputRef = useRef<TextInputInstance>(null);
+   const [input, setInput] = useState(() => ({ text: props.value, version: 0 }));
+   const nativeText = useRef(props.value);
++  // Typed or dictated text owns the input; a saved answer that loads later does not replace it.
++  const edited = useRef(false);
+   const [selection, setSelection] = useState<ComposerEditorSelection>(() => ({
+     start: props.value.length,
+     end: props.value.length,
+@@ -107,6 +109,7 @@ export function QuestionAttachments(props: {
+         focusedRef.current = false;
+         onInputFocusChange?.(false);
+       }
++      edited.current = true;
+       nativeText.current = text;
+       setInput((current) => ({ text, version: current.version + 1 }));
+       props.onChangeText(text);
+@@ -123,6 +126,13 @@ export function QuestionAttachments(props: {
      inputRef.current?.clear();
      setSelection({ start: 0, end: 0 });
    }, [props.value]);
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- an answer saved before an app restart can load after this input mounted empty; the remount shows it
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- an answer saved before an app restart can load after this input mounted empty or with the suggested answer; the remount shows it
 +  useEffect(() => {
-+    if (props.value === "" || nativeText.current !== "") return;
++    if (edited.current || props.value === "" || props.value === nativeText.current) return;
 +    nativeText.current = props.value;
 +    setInput((current) => ({ text: props.value, version: current.version + 1 }));
 +    setSelection({ start: props.value.length, end: props.value.length });
@@ -16,11 +33,34 @@ index 45b4ad2d6a..3b476a6e0f 100644
    const append = (
      key: string,
      attachments: Parameters<typeof appendComposerDraftAttachments>[1],
+@@ -265,6 +275,7 @@ export function QuestionAttachments(props: {
+               submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
+               editable={!props.disabled && !voice.freezesEditor}
+               onChangeText={(text) => {
++                edited.current = true;
+                 nativeText.current = text;
+                 props.onChangeText(text);
+               }}
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-index 12b9a555e6..018511a85f 100644
+index 12b9a555e6..b4da8aabb1 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-@@ -128,25 +128,28 @@ function setup() {
+@@ -113,7 +113,7 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
+ 
+ import { QuestionAttachments } from "./QuestionAttachments";
+ 
+-function setup() {
++function setup(initialAnswer?: string) {
+   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+   harness.voice = null;
+   harness.started = 0;
+@@ -123,30 +123,34 @@ function setup() {
+     question: "Type your answer",
+     options: [],
+     multiSelect: false,
++    initialAnswer,
+   } as UserInputQuestion;
+   const changes: string[] = [];
    const focus: boolean[] = [];
    const container = document.body.appendChild(document.createElement("div"));
    const root = createRoot(container);
@@ -51,7 +91,7 @@ index 12b9a555e6..018511a85f 100644
 +        />,
 +      ),
 +    );
-+  render("");
++  render(initialAnswer ?? "");
    const input = () => container.querySelector("input")!;
    return {
      changes,
@@ -62,7 +102,7 @@ index 12b9a555e6..018511a85f 100644
      pressMic: () => {
        const mic = [...container.querySelectorAll("button")].find(
          (button) => button.textContent === "Start voice input",
-@@ -200,3 +203,14 @@ it("takes no transcript after the answer field unmounts", () => {
+@@ -200,3 +204,34 @@ it("takes no transcript after the answer field unmounts", () => {
    voice.onChangeDraftMessage("late");
    expect(screen.changes).toEqual([]);
  });
@@ -74,6 +114,26 @@ index 12b9a555e6..018511a85f 100644
 +  screen.rerender("half typed answer");
 +  expect(screen.input().value).toBe("half typed answer");
 +  expect(screen.voice().readDraftMessage()).toBe("half typed answer");
++
++  screen.unmount();
++});
++
++it("replaces an untouched suggested answer with the saved edit", () => {
++  const screen = setup("Suggested title");
++  expect(screen.input().value).toBe("Suggested title");
++
++  screen.rerender("Edited title");
++  expect(screen.input().value).toBe("Edited title");
++
++  screen.unmount();
++});
++
++it("keeps typed text when a saved answer loads later", () => {
++  const screen = setup();
++  screen.type("typed now");
++
++  screen.rerender("older saved text");
++  expect(screen.input().value).toBe("typed now");
 +
 +  screen.unmount();
 +});
