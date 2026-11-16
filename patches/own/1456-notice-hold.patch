@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts b/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
-index e26487fdf2..8e88c7bf50 100644
+index e26487fdf2..8f4d5c6077 100644
 --- a/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
 +++ b/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
 @@ -1405,7 +1405,7 @@ const seedRestartCancelledChild = (input: {
@@ -11,7 +11,7 @@ index e26487fdf2..8e88c7bf50 100644
    readonly lostWork?: OrchestrationV2Run["restartCancelledBackgroundWork"];
    readonly now: DateTime.Utc;
  }) =>
-@@ -1515,6 +1515,227 @@ const seedRestartCancelledChild = (input: {
+@@ -1515,6 +1515,316 @@ const seedRestartCancelledChild = (input: {
      return { taskId, childThreadId, childRunId };
    });
  
@@ -147,6 +147,95 @@ index e26487fdf2..8e88c7bf50 100644
 +      }),
 +    );
 +
++    it.effect("releases notices across parent runs on the next child end", () =>
++      Effect.gen(function* () {
++        const test = yield* seedNoticeHold("notice-hold-cross-run", 3);
++        yield* Effect.gen(function* () {
++          const parent = yield* test.orchestrator.getThreadProjection(test.threadId);
++          const firstRun = parent.runs.find((run) => run.id === test.runId)!;
++          const secondRunId = RunId.make("run:notice-hold-cross-run:2");
++          yield* test.sink.write({
++            commandId: reconcileCommandId("notice-hold-cross-run-second-parent"),
++            events: [
++              runEvent({
++                threadId: test.threadId,
++                runId: secondRunId,
++                ordinal: 2,
++                status: "completed",
++                providerThreadId: firstRun.providerThreadId!,
++                now: test.now,
++              }),
++              ...test.children.slice(1).map((child) => ({
++                id: EventId.make(`event:notice-hold-cross-run-parent:${child.taskId}`),
++                type: "subagent.updated" as const,
++                threadId: test.threadId,
++                runId: secondRunId,
++                nodeId: child.taskId,
++                occurredAt: test.now,
++                payload: {
++                  ...parent.subagents.find((task) => task.id === child.taskId)!,
++                  runId: secondRunId,
++                },
++              })),
++            ],
++          });
++          yield* test.complete(0);
++          assert.equal(test.offer.mock.calls.length, 0);
++          yield* TestClock.adjust("30 seconds");
++          yield* test.complete(1);
++          assert.equal(test.offer.mock.calls.length, 2);
++          assert.deepEqual(
++            test.offer.mock.calls.map(([request]) => request.delegatedCompletion?.parentRunId),
++            [test.runId, secondRunId],
++          );
++          const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
++          for (const [index, parentRunId] of [test.runId, secondRunId].entries()) {
++            const request = yield* requests.take;
++            assert.equal(request.threadId, test.threadId);
++            const projection = yield* test.orchestrator.getThreadProjection(test.threadId);
++            const delivery = projection.runs.find((run) => run.id === parentRunId)!
++              .delegatedCompletion!.delivery!;
++            assert.equal(request.delegatedCompletion?.messageId, delivery.messageId);
++            assert.deepEqual(delivery.taskIds, [test.children[index]!.taskId]);
++            yield* test.orchestrator.dispatch({
++              type: "message.dispatch",
++              commandId: CommandId.make(`command:notice-hold-cross-run-deliver:${index}`),
++              threadId: test.threadId,
++              messageId: delivery.messageId,
++              text: "Delegated tasks finished.",
++              attachments: [],
++              createdBy: "agent",
++              creationSource: "server",
++              dispatchMode: { type: "queue_after_active" },
++              delegatedCompletion: {
++                parentRunId,
++                generation: delivery.generation,
++                taskIds: delivery.taskIds,
++              },
++            });
++          }
++          const delivered = yield* test.orchestrator.getThreadProjection(test.threadId);
++          const notices = delivered.messages.filter((message) => message.delegatedCompletion);
++          assert.lengthOf(notices, 2);
++          assert.deepEqual(
++            [test.runId, secondRunId].map((parentRunId) => {
++              const message = notices.find(
++                (notice) => notice.delegatedCompletion!.parentRunId === parentRunId,
++              )!;
++              return delivered.runs.find((run) => run.id === message.runId)!.status;
++            }),
++            ["starting", "queued"],
++          );
++          assert.equal(
++            delivered.subagents.find((task) => task.id === test.children[2]!.taskId)!.status,
++            "running",
++          );
++          yield* TestClock.adjust("120 seconds");
++          assert.equal(test.offer.mock.calls.length, 2);
++        }).pipe(Effect.ensuring(Effect.sync(() => test.offer.mockRestore())));
++      }),
++    );
++
 +    it.effect.each([30, 130])("restores the saved hold after a restart at %s seconds", (elapsed) =>
 +      Effect.gen(function* () {
 +        const test = yield* seedNoticeHold(`notice-hold-restart-${elapsed}`, 2);
@@ -239,7 +328,7 @@ index e26487fdf2..8e88c7bf50 100644
  // Parent spawned two always-wake tasks: the incoming one's completion wake is queued behind a busy
  // run while the sibling's child run is still going.
  const queueCompletionWakeBesideRunningSibling = (key: string) =>
-@@ -3837,6 +4058,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
+@@ -3837,6 +4147,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
            );
            assert.equal(followup.cancelledRunId, outcome === "cancelled" ? run.id : undefined);
            if (outcome !== "stopped" && outcome !== "cancelled") {
@@ -248,7 +337,7 @@ index e26487fdf2..8e88c7bf50 100644
              while (
                wake.threadId !== parentThreadId ||
 diff --git a/apps/server/src/orchestration-v2/Orchestrator.ts b/apps/server/src/orchestration-v2/Orchestrator.ts
-index 27f7aa82fd..fc42e02036 100644
+index 27f7aa82fd..75b5fbbd4e 100644
 --- a/apps/server/src/orchestration-v2/Orchestrator.ts
 +++ b/apps/server/src/orchestration-v2/Orchestrator.ts
 @@ -95,6 +95,7 @@ import * as DateTime from "effect/DateTime";
@@ -279,7 +368,7 @@ index 27f7aa82fd..fc42e02036 100644
    // Read once: the policy is fixed for the server's life, and dispatch takes it as an input.
    const { managedPolicy } = serverSettings;
    const runtimeModeCeiling: RuntimeModeCeiling | undefined =
-@@ -2008,7 +2015,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -2008,7 +2015,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
  
    const offerDelegatedCompletionDelivery =
      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -287,15 +376,16 @@ index 27f7aa82fd..fc42e02036 100644
 +    Effect.fnUntraced(function* (
 +      threadId: ThreadId,
 +      parentRunId: RunId,
++      releaseHold = false,
 +    ): Effect.fn.Return<void, ProjectionStoreV2Error> {
        const controls = yield* projectionStore.getThreadRecords(threadId, ["runs"], {
          runIds: [parentRunId],
        });
-@@ -2040,6 +2050,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -2040,6 +2051,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
          if (!isUndeliveredMailboxSteer({ ...messages, ...runs, ...turns }, delivery.messageId))
            return;
        }
-+      if (message === undefined) {
++      if (message === undefined && !releaseHold) {
 +        const records = yield* projectionStore.getThreadRecords(threadId, ["runs", "subagents"]);
 +        const idle = !records.runs.some((run) => isLiveRun(run) || run.status === "queued");
 +        const runningSibling = records.subagents.some(
@@ -346,15 +436,22 @@ index 27f7aa82fd..fc42e02036 100644
        const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"], {
          providerThreadIds: parentRun.providerThreadId === null ? [] : [parentRun.providerThreadId],
        });
-@@ -14604,6 +14662,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -14601,8 +14660,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+       yield* writeSystemEvents(completionEvents, [], { updateDelegatedCompletionOnly: true });
+       yield* releaseFinishedDelegateSessions(childThreadId, childRun.id);
+ 
++      const heldRuns = new Set(
++        [...heldCompletionDeliveries.values()]
++          .filter((held) => held.threadId === parentThreadId)
++          .map((held) => held.parentRunId),
++      );
++      const releaseHold = heldRuns.size > 0;
        if (completionPlan.offer && completionPlan.parentRun !== undefined) {
-         yield* offerDelegatedCompletionDelivery(parentThreadId, completionPlan.parentRun.id);
-       }
-+      for (const held of heldCompletionDeliveries.values()) {
-+        if (held.threadId === parentThreadId && held.parentRunId !== completionPlan.parentRun?.id) {
-+          yield* offerDelegatedCompletionDelivery(parentThreadId, held.parentRunId);
-+        }
+-        yield* offerDelegatedCompletionDelivery(parentThreadId, completionPlan.parentRun.id);
++        heldRuns.add(completionPlan.parentRun.id);
 +      }
++      for (const parentRunId of heldRuns) {
++        yield* offerDelegatedCompletionDelivery(parentThreadId, parentRunId, releaseHold);
+       }
      },
    );
- 
