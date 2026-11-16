@@ -11,8 +11,10 @@ decisions.
   SHA with its saved diff in `patches/upstream/`. Own patches follow, each with
   its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 8
   own patches, bug fixes only.
-- `.github/workflows/nightly.yml` runs every 30 minutes with no model. For each
-  new upstream nightly it publishes the release `v<version>`:
+- `.github/workflows/nightly.yml` runs with no model. Its cron asks for a run
+  every 30 minutes, but GitHub drops most of these runs. So the Shell timer
+  `patch-store-gate` on Morgan's PC also starts it for each new nightly with no
+  release. For each new upstream nightly it publishes the release `v<version>`:
   - the Linux x64 server archive and `SHA256SUMS`. When a server patch applies,
     it is a build with `PATCHES.json` in the top folder of the archive. Else it
     is a byte-for-byte copy of upstream's archive and checksum file.

@@ -16,9 +16,10 @@ first. Then act on each fault:
 - A build failed. Read the failed step. Repair the workflow when upstream
   changed a build step. Never publish a release by hand.
 - A PR was closed unmerged. Ask Morgan: keep it as an own patch, or drop it.
-- No release for the newest nightly. Check that the workflow is on (GitHub
-  turns off a schedule after 60 days with no repo activity) and that its last
-  run passed. Turn it on and run it.
+- No release for the newest nightly. The gate started the workflow 60 minutes
+  ago, or the reason gives its start error. Read the run of that start and the
+  last runs. Check that the workflow is on (GitHub turns off a workflow after
+  60 days with no repo activity). Turn it on and run it.
 
 Write nothing to pingdotgg/t3code. Own patches stay at most 8, bug fixes only,
 each with its Shell issue, its check and a `dropWhen` line.
