@@ -34,6 +34,13 @@
       "file": "patches/own/1409-server-voice-settings.patch",
       "check": "With a Project dictionary alias and a cleanup model on the server, phone dictation inserts the dictionary term and cleaned text. Steps: own-patches/1409-server-voice-settings/report.md of Shell issue 1411.",
       "dropWhen": "Upstream phone voice input sends speechProjectCustomWords and calls postProcess for an environment destination."
+    },
+    {
+      "id": "1448-form-free-text-mic",
+      "bug": 1448,
+      "file": "patches/own/1448-form-free-text-mic.patch",
+      "check": "A T3 question form with a free-text answer shows the composer mic button next to the field. A dictated answer lands in the field with the dictionary word and cleanup of the composer. The one feature in this list: Morgan allowed it on 2026-11-16 in Shell issue 1448.",
+      "dropWhen": "The upstream QuestionAttachments of the tag already calls useVoiceInputController for the free-text answer."
     }
   ]
 }
