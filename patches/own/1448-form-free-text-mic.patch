@@ -115,7 +115,7 @@ index a486948e18..dca5752dae 100644
        />
        {props.pendingUserInput.dismissible ? (
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 3cc26c42fd..dd884da382 100644
+index 3cc26c42fd..45b4ad2d6a 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
 @@ -29,6 +29,17 @@ import {
@@ -192,7 +192,7 @@ index 3cc26c42fd..dd884da382 100644
    }, [props.value]);
    const append = (
      key: string,
-@@ -205,29 +252,74 @@ export function QuestionAttachments(props: {
+@@ -205,29 +252,79 @@ export function QuestionAttachments(props: {
        />
        <FilePreviewModal source={previewFile} onRequestClose={() => setPreviewFile(null)} />
        <VideoPreviewModal source={previewVideo} onRequestClose={() => setPreviewVideo(null)} />
@@ -219,33 +219,36 @@ index 3cc26c42fd..dd884da382 100644
 -          className="min-h-[54px] rounded-2xl border border-input-border bg-input px-3.5 py-3 font-sans text-base text-foreground"
 -        />
 -      </TextInputWrapper>
-+      {/* The mic sits inside the answer box, as in the thread composer. */}
++      {/* The mic and the dictation bar sit inside the answer box, as in the thread composer. */}
 +      <View className="min-h-[54px] flex-row items-end rounded-2xl border border-input-border bg-input">
-+        <TextInputWrapper onPaste={paste} style={{ flex: 1, minWidth: 0 }}>
-+          <TextInput
-+            key={input.version}
-+            ref={inputRef}
-+            defaultValue={input.text}
-+            multiline={props.question.initialAnswer !== undefined}
-+            submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
-+            editable={!props.disabled && !voice.freezesEditor}
-+            onChangeText={(text) => {
-+              nativeText.current = text;
-+              props.onChangeText(text);
-+            }}
-+            onSelectionChange={({ nativeEvent }) => setSelection(nativeEvent.selection)}
-+            onFocus={() => {
-+              focusedRef.current = true;
-+              onInputFocusChange?.(true);
-+            }}
-+            onBlur={() => {
-+              focusedRef.current = false;
-+              onInputFocusChange?.(false);
-+            }}
-+            placeholder="Or type a custom answer"
-+            className="min-h-[52px] rounded-none border-0 bg-transparent px-3.5 py-3 font-sans text-base text-foreground"
-+          />
-+        </TextInputWrapper>
++        {/* Hidden, not unmounted, during dictation: the input owns its typed text. */}
++        <View style={showsDictation ? { display: "none" } : { flex: 1, minWidth: 0 }}>
++          <TextInputWrapper onPaste={paste}>
++            <TextInput
++              key={input.version}
++              ref={inputRef}
++              defaultValue={input.text}
++              multiline={props.question.initialAnswer !== undefined}
++              submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
++              editable={!props.disabled && !voice.freezesEditor}
++              onChangeText={(text) => {
++                nativeText.current = text;
++                props.onChangeText(text);
++              }}
++              onSelectionChange={({ nativeEvent }) => setSelection(nativeEvent.selection)}
++              onFocus={() => {
++                focusedRef.current = true;
++                onInputFocusChange?.(true);
++              }}
++              onBlur={() => {
++                focusedRef.current = false;
++                onInputFocusChange?.(false);
++              }}
++              placeholder="Or type a custom answer"
++              className="min-h-[52px] rounded-none border-0 bg-transparent px-3.5 py-3 font-sans text-base text-foreground"
++            />
++          </TextInputWrapper>
++        </View>
 +        {voice.isAvailable && !showsDictation ? (
 +          <View className="p-1">
 +            <ComposerDictationStartAction
@@ -257,36 +260,38 @@ index 3cc26c42fd..dd884da382 100644
 +            />
 +          </View>
 +        ) : null}
++        {showsDictation ? (
++          <View className="min-w-0 flex-1 p-1">
++            <ComposerDictationToolbar showsDictation>
++              <View className="h-11 flex-row items-center">
++                <ComposerDictationCancelAction
++                  presentation={voicePresentation}
++                  onCancel={voice.cancel}
++                />
++                <ComposerDictationStatus
++                  audioLevels={voice.audioLevels}
++                  elapsedSeconds={voice.elapsedSeconds}
++                  phase={voice.state.phase}
++                  presentation={voicePresentation}
++                />
++                <ComposerDictationPrimaryAction
++                  state={voice.state}
++                  presentation={voicePresentation}
++                  isAvailable={voice.isAvailable}
++                  disabled={props.disabled}
++                  onStart={voice.start}
++                  onConfirm={voice.stop}
++                  onCancel={voice.cancel}
++                />
++              </View>
++            </ComposerDictationToolbar>
++          </View>
++        ) : null}
 +      </View>
 +      <ComposerDictationError
 +        error={voice.state.phase === "error" ? voice.state.error : null}
 +        onDismiss={voice.cancel}
 +      />
-+      {showsDictation ? (
-+        <ComposerDictationToolbar showsDictation>
-+          <View className="h-11 flex-row items-center">
-+            <ComposerDictationCancelAction
-+              presentation={voicePresentation}
-+              onCancel={voice.cancel}
-+            />
-+            <ComposerDictationStatus
-+              audioLevels={voice.audioLevels}
-+              elapsedSeconds={voice.elapsedSeconds}
-+              phase={voice.state.phase}
-+              presentation={voicePresentation}
-+            />
-+            <ComposerDictationPrimaryAction
-+              state={voice.state}
-+              presentation={voicePresentation}
-+              isAvailable={voice.isAvailable}
-+              disabled={props.disabled}
-+              onStart={voice.start}
-+              onConfirm={voice.stop}
-+              onCancel={voice.cancel}
-+            />
-+          </View>
-+        </ComposerDictationToolbar>
-+      ) : null}
      </View>
    );
  }
