@@ -41,6 +41,13 @@
       "file": "patches/own/1448-form-free-text-mic.patch",
       "check": "A T3 question form with a free-text answer shows the composer mic button inside the answer box, and the recording bar takes its place inside the box during dictation. A dictated answer lands in the field with the dictionary word and cleanup of the composer. The one feature in this list: Morgan allowed it on 2026-11-16 in Shell issue 1448.",
       "dropWhen": "The upstream QuestionAttachments of the tag already calls useVoiceInputController for the free-text answer."
+    },
+    {
+      "id": "1456-notice-hold",
+      "bug": 1456,
+      "file": "patches/own/1456-notice-hold.patch",
+      "check": "Start two delegated children, then let the parent finish its turn. End one child, then end the other 30 seconds later. The parent gets one notice with both task IDs. With only one child, its notice arrives at once. With another child still running, the first notice arrives after 120 seconds. Restart the server during the hold: it still delivers the notice by the original deadline, or at startup if that deadline passed. With A from parent run R1 and B and C from R2, end A, then end B 30 seconds later while C still runs. A and B notices arrive together at B's end, with no later deadline notice.",
+      "dropWhen": "Upstream groups child end notices for idle parents with a hold of at most 120 seconds and restores held notices after a server restart without a database migration."
     }
   ]
 }
