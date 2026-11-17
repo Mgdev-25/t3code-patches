@@ -55,6 +55,27 @@
       "file": "patches/own/1467-form-draft-save.patch",
       "check": "Unsent answers of a T3 question form survive an app restart: choose an option and type text without sending, switch apps, force-close the app, open it again, and the form shows the same option and text. The answers are saved in user-input-drafts/drafts.json in the app documents folder. Builds on 1448-form-free-text-mic, which also changes QuestionAttachments.",
       "dropWhen": "Upstream apps/mobile saves question form answers to disk, so userInputDraftsByRequestKeyAtom (or what replaced it) is loaded from a file at app start."
+    },
+    {
+      "id": "1472-codex-credits",
+      "bug": 1472,
+      "file": "patches/own/1472-codex-credits.patch",
+      "check": "With the Codex week window at 100 % and has_credits true, a voice cleanup on the server runs on the Codex cleanup model (Terra), not on the Claude fallback, and the Settings usage bar still shows 100 %. With no credits, T3 falls back as before. From Shell issue 1210.",
+      "dropWhen": "The upstream exhaustedUsageWindow of the tag lets Codex credits (hasCredits or unlimited) keep a full Codex plan window from blocking."
+    },
+    {
+      "id": "1473-server-cleanup-prompt",
+      "bug": 1473,
+      "file": "patches/own/1473-server-cleanup-prompt.patch",
+      "check": "Put a prompt in voice-cleanup-prompt.txt in the server userdata folder. A phone dictation and a desktop dictation with Instructions on Built-in get the same cleanup from that prompt. With the file empty or gone, both use the built-in prompt. A desktop Custom prompt still wins. From Shell issue 1210.",
+      "dropWhen": "Upstream lets the server replace the built-in voice cleanup prompt for every client, or the phone sends the desktop custom prompt."
+    },
+    {
+      "id": "1474-cleanup-fallback-model",
+      "bug": 1474,
+      "file": "patches/own/1474-cleanup-fallback-model.patch",
+      "check": "Settings > Voice > Cleanup shows a Fallback cleanup model row under Cleanup model, and it saves the model. When the cleanup model is out of usage (for Codex: also no credits) or cannot run, cleanup runs on the fallback model when it can run, else on T3's own fallback. Morgan's feature exception of 2026-11-17 in Shell issue 1210. Builds on 1472-codex-credits.",
+      "dropWhen": "Upstream server settings have a fallback model for voice transcript cleanup."
     }
   ]
 }

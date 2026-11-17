@@ -1,0 +1,516 @@
+diff --git a/apps/server/src/textGeneration/CodexTextGeneration.test.ts b/apps/server/src/textGeneration/CodexTextGeneration.test.ts
+index 1a1a5c43b0..2cb600d11d 100644
+--- a/apps/server/src/textGeneration/CodexTextGeneration.test.ts
++++ b/apps/server/src/textGeneration/CodexTextGeneration.test.ts
+@@ -786,6 +786,156 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
+   }),
+ );
+ 
++const CLEANUP_FALLBACK_CASES = [
++  ["cleanup model ready", "primary"],
++  ["fallback ready", "fallback"],
++  ["fallback out of usage", "chain"],
++  ["fallback signed out", "chain"],
++  ["no fallback set", "chain"],
++  ["thread title ignores the fallback", "chain"],
++  ["fallback text generator on", "generator"],
++  ["fallback text generator off", "chain"],
++] as const;
++
++it.effect.each(CLEANUP_FALLBACK_CASES)(
++  "voice cleanup fallback model: %s uses the %s model",
++  ([state, expected]) =>
++    Effect.gen(function* () {
++      const primary = ProviderInstanceId.make("codex");
++      const chain = ProviderInstanceId.make("claude_work");
++      const fallback = ProviderInstanceId.make("muse_cleanup");
++      const selection = { instanceId: primary, model: "gpt-6.1-terra" };
++      const threadDefault = { instanceId: chain, model: "claude-haiku-5-5" };
++      const generator = ProviderInstanceId.make("api_cleanup");
++      const usesGenerator = state.startsWith("fallback text generator");
++      const fallbackSelection = usesGenerator
++        ? { instanceId: generator, model: "api-model" }
++        : { instanceId: fallback, model: "muse-ember-1.0" };
++      const exhausted = {
++        checkedAt: "1970-01-01T00:00:00Z",
++        windows: [{ id: "secondary", kind: "weekly" as const, label: "Weekly", usedPercent: 100 }],
++      };
++      const calls: ModelSelection[] = [];
++      const record = (modelSelection: ModelSelection) =>
++        Effect.sync(() => calls.push(modelSelection));
++      const instances: ProviderInstance[] = [primary, chain, fallback].map((instanceId) => {
++        const driver = ProviderDriverKind.make(
++          instanceId === primary ? "codex" : instanceId === chain ? "claudeAgent" : "muse",
++        );
++        const snapshot: ServerProvider = {
++          instanceId,
++          driver,
++          enabled: true,
++          installed: true,
++          status: "ready",
++          auth: { status: "authenticated" },
++          version: null,
++          checkedAt: "1970-01-01T00:00:00Z",
++          models: [],
++          slashCommands: [],
++          skills: [],
++          ...(instanceId === primary && state !== "cleanup model ready"
++            ? { usageLimits: exhausted }
++            : {}),
++          ...(instanceId === fallback && state === "fallback out of usage"
++            ? { usageLimits: exhausted }
++            : {}),
++          ...(instanceId === fallback && state === "fallback signed out"
++            ? { status: "error", auth: { status: "unauthenticated" } }
++            : {}),
++        };
++        return {
++          instanceId,
++          driverKind: driver,
++          continuationIdentity: { driverKind: driver, continuationKey: instanceId },
++          displayName: undefined,
++          enabled: true,
++          snapshot: { getSnapshot: Effect.succeed(snapshot) } as ProviderInstance["snapshot"],
++          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
++          textGeneration: TextGeneration.TextGeneration.of({
++            generateCommitMessage: () => Effect.die("unused"),
++            generatePrContent: () => Effect.die("unused"),
++            generateBranchName: () => Effect.die("unused"),
++            generateReviewGuide: () => Effect.die("unused"),
++            generateTranscriptionPostProcessing: (input) =>
++              record(input.modelSelection).pipe(Effect.as({ transcription: "Hello." })),
++            generateThreadTitle: (input) =>
++              record(input.modelSelection).pipe(Effect.as({ title: "Generated title" })),
++          }),
++        };
++      });
++      const service = yield* TextGeneration.make.pipe(
++        Effect.provide(
++          Layer.mergeAll(
++            Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
++              listInstances: Effect.succeed(instances),
++              getInstance: (id) =>
++                Effect.succeed(instances.find((instance) => instance.instanceId === id)),
++            }),
++            ServerSettings.layerTest({
++              providerInstances: {
++                [chain]: {
++                  driver: ProviderDriverKind.make("claudeAgent"),
++                  config: { customModels: [threadDefault.model] },
++                },
++                [fallback]: { driver: ProviderDriverKind.make("muse"), enabled: true },
++              },
++              textGenerators: {
++                [generator]: {
++                  kind: "openaiCompatible",
++                  baseUrl: "http://127.0.0.1:18999/v1",
++                  enabled: state === "fallback text generator on",
++                },
++              },
++              defaultModelSelection: threadDefault,
++              speechPostProcessingFallbackModelSelection:
++                state === "no fallback set" ? null : fallbackSelection,
++            }),
++            Layer.mock(TextGenerators.TextGenerators)({
++              // The real runner of a generator that is off only fails.
++              runner: (id) =>
++                Effect.succeed(
++                  id === generator
++                    ? (((request: { readonly modelSelection: ModelSelection }) =>
++                        state === "fallback text generator on"
++                          ? record(request.modelSelection).pipe(
++                              Effect.as({ transcription: "Hello." }),
++                            )
++                          : Effect.die("a generator that is off ran")) as never)
++                    : undefined,
++                ),
++            }),
++            Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
++              resolveLink: () => Effect.die("unused"),
++            }),
++            ProviderInstallationGate.layer,
++          ),
++        ),
++      );
++      if (state === "thread title ignores the fallback") {
++        yield* service.generateThreadTitle({
++          cwd: "/tmp",
++          message: "hello",
++          linkedContext: "",
++          modelSelection: selection,
++        });
++      } else {
++        yield* service.generateTranscriptionPostProcessing({
++          cwd: "/tmp",
++          prompt: "Clean this.",
++          modelSelection: selection,
++        });
++      }
++      expect(calls).toEqual([
++        expected === "primary"
++          ? selection
++          : expected === "fallback" || expected === "generator"
++            ? fallbackSelection
++            : threadDefault,
++      ]);
++    }),
++);
++
+ it.effect(
+   "a review guide aimed at a text generator falls back to an agent that can read the checkout",
+   () =>
+diff --git a/apps/server/src/textGeneration/TextGeneration.ts b/apps/server/src/textGeneration/TextGeneration.ts
+index c91aa0623d..34dce2cdc0 100644
+--- a/apps/server/src/textGeneration/TextGeneration.ts
++++ b/apps/server/src/textGeneration/TextGeneration.ts
+@@ -6,6 +6,7 @@ import {
+   isProviderAvailable,
+   isProviderTextGenerationCapable,
+   resolveProjectProviderInstanceEnabled,
++  textGeneratorForSelection,
+ } from "@t3tools/contracts";
+ import * as DateTime from "effect/DateTime";
+ import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
+@@ -124,26 +125,57 @@ export const make = Effect.gen(function* () {
+             }),
+         ),
+       );
++      const canRun = (instanceId: ProviderInstanceId, driver: string, model: string) => {
++        const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
++        return (
++          provider?.enabled === true &&
++          resolveProjectProviderInstanceEnabled(settings, projectId ?? null, instanceId) &&
++          provider.installed &&
++          provider.auth.status !== "unauthenticated" &&
++          provider.status !== "error" &&
++          isProviderAvailable(provider) &&
++          isProviderTextGenerationCapable(provider) &&
++          (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
++          !exhaustedUsageWindow(provider, now, model)
++        );
++      };
++      // Morgan's fallback for voice cleanup comes before T3's own chain when it can run.
++      const preferred =
++        operation === "generateTranscriptionPostProcessing"
++          ? settings.speechPostProcessingFallbackModelSelection
++          : null;
++      // A text generator that is off only fails, so T3's chain runs instead.
++      if (
++        preferred !== null &&
++        textGeneratorForSelection(settings, preferred.instanceId)?.enabled === true
++      ) {
++        const runner = yield* textGenerators.runner(preferred.instanceId);
++        if (runner !== undefined) {
++          return yield* invoke(
++            TextGenerationOperations.fromRunner("TextGenerator", runner),
++            preferred,
++          );
++        }
++      }
++      const preferredProvider =
++        preferred === null
++          ? undefined
++          : snapshots.find((provider) => provider.instanceId === preferred.instanceId);
++      const preferredCanRun =
++        preferred !== null &&
++        preferredProvider !== undefined &&
++        preferredProvider.models.find((model) => model.slug === preferred.model)
++          ?.supportsTextGeneration !== false &&
++        canRun(preferred.instanceId, preferredProvider.driver, preferred.model);
+       selection =
++        (preferredCanRun ? preferred : null) ??
+         fallbackTextGenerationModelSelection(
+           settings.providerInstances,
+-          (instanceId, driver, model) => {
+-            const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
+-            return (
+-              instanceId !== selection.instanceId &&
+-              provider?.enabled === true &&
+-              resolveProjectProviderInstanceEnabled(settings, projectId ?? null, instanceId) &&
+-              provider.installed &&
+-              provider.auth.status !== "unauthenticated" &&
+-              provider.status !== "error" &&
+-              isProviderAvailable(provider) &&
+-              isProviderTextGenerationCapable(provider) &&
+-              (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
+-              !exhaustedUsageWindow(provider, now, model)
+-            );
+-          },
++          (instanceId, driver, model) =>
++            instanceId !== selection.instanceId && canRun(instanceId, driver, model),
+           { defaultModelSelection: settings.defaultModelSelection },
+-        ) ?? selection;
++        ) ??
++        selection;
+     }
+     if (textGeneratorCannotRun && selection.instanceId === textGeneratorId) {
+       return yield* new TextGenerationError({
+diff --git a/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx b/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx
+index c010748346..0c40fa5cba 100644
+--- a/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx
++++ b/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx
+@@ -547,6 +547,7 @@ it.each([
+   ["transcription-test", "voice-transcription-destination"],
+   ["speech-correction-word", "speech-post-processing"],
+   ["speech-post-processing-model", "speech-post-processing"],
++  ["speech-post-processing-fallback-model", "speech-post-processing"],
+ ])(
+   "searching for disabled %s focuses its opt-in without enabling it",
+   async (target, prerequisite) => {
+diff --git a/apps/web/src/components/settings/VoiceSettingsPanel.tsx b/apps/web/src/components/settings/VoiceSettingsPanel.tsx
+index 91d73a0d07..075a18f9de 100644
+--- a/apps/web/src/components/settings/VoiceSettingsPanel.tsx
++++ b/apps/web/src/components/settings/VoiceSettingsPanel.tsx
+@@ -20,6 +20,7 @@ import {
+   type EnvironmentId,
+   type EnvironmentSpeechModel,
+   type EnvironmentSpeechStatus,
++  type ModelSelection,
+   type ProjectId,
+   ProviderDriverKind,
+   type SpeechAcceleration,
+@@ -497,8 +498,11 @@ function ProjectDictionaryRow() {
+   );
+ }
+ 
+-/** Cleanup runs on the draft's environment, so its model is an environment setting there. */
+-function CleanupModelRow() {
++/**
++ * Cleanup runs on the draft's environment, so its model is an environment setting there.
++ * With `fallback`, the row sets the model that runs when the cleanup model cannot run.
++ */
++function CleanupModelRow({ fallback = false }: { readonly fallback?: boolean }) {
+   const { environment, connectedEnvironments } = useSettingsScope();
+   const settings = useScopedSettings();
+   const updateSettings = useUpdateScopedSettings();
+@@ -514,20 +518,30 @@ function CleanupModelRow() {
+     projectId: null,
+     selections: [
+       settings.speechPostProcessingModelSelection,
++      settings.speechPostProcessingFallbackModelSelection,
+       settings.textGenerationModelSelection,
+     ],
+   });
+   const textGenerationProviders = targets.providers;
+   const instanceEntries = targets.entries;
+   const hasProvider = instanceEntries.some((entry) => entry.enabled && entry.isAvailable);
+-  const dedicated = settings.speechPostProcessingModelSelection !== null;
++  const key = fallback
++    ? "speechPostProcessingFallbackModelSelection"
++    : "speechPostProcessingModelSelection";
++  const save = (next: ModelSelection | null) =>
++    updateSettings(
++      fallback
++        ? { speechPostProcessingFallbackModelSelection: next }
++        : { speechPostProcessingModelSelection: next },
++    );
++  const dedicated = settings[key] !== null;
+   const selection = resolveAppModelSelectionState(
+     {
+       ...settings,
+-      textGenerationModelSelection: resolveSpeechPostProcessingModelSelection(
+-        settings,
+-        textGenerationProviders,
+-      ),
++      textGenerationModelSelection: fallback
++        ? (settings.speechPostProcessingFallbackModelSelection ??
++          settings.textGenerationModelSelection)
++        : resolveSpeechPostProcessingModelSelection(settings, textGenerationProviders),
+     },
+     textGenerationProviders,
+   );
+@@ -542,18 +556,28 @@ function CleanupModelRow() {
+   const setModel = (next: ReturnType<typeof createModelSelection>) => {
+     const reason = modelDisabledReason(next.instanceId, next.model);
+     if (reason) {
+-      toastManager.add({ type: "error", title: "Cleanup model not saved", description: reason });
++      toastManager.add({
++        type: "error",
++        title: fallback ? "Fallback cleanup model not saved" : "Cleanup model not saved",
++        description: reason,
++      });
+       return;
+     }
+-    updateSettings({ speechPostProcessingModelSelection: next });
++    save(next);
+   };
+   return (
+     <SettingsRow
+       serverScoped
+-      settingKeys={["speechPostProcessingModelSelection"]}
+-      {...searchableSetting("speech-post-processing-model")}
+-      title="Cleanup model"
+-      description="Model for transcript cleanup, such as a cheaper or faster one. When disabled, use the text generation model configured for this environment."
++      settingKeys={[key]}
++      {...searchableSetting(
++        fallback ? "speech-post-processing-fallback-model" : "speech-post-processing-model",
++      )}
++      title={fallback ? "Fallback cleanup model" : "Cleanup model"}
++      description={
++        fallback
++          ? "Model for cleanup when the cleanup model cannot run or is out of usage. When disabled, T3 picks a fallback itself."
++          : "Model for transcript cleanup, such as a cheaper or faster one. When disabled, use the text generation model configured for this environment."
++      }
+       control={
+         connectedEnvironments.length === 0 ? (
+           <span className="text-sm text-muted-foreground">Connect an environment first.</span>
+@@ -596,17 +620,19 @@ function CleanupModelRow() {
+               checked={dedicated}
+               disabled={!dedicated && !hasProvider}
+               onCheckedChange={(checked) =>
+-                updateSettings({
+-                  speechPostProcessingModelSelection: checked
++                save(
++                  checked
+                     ? createModelSelection(
+                         settings.textGenerationModelSelection.instanceId,
+                         settings.textGenerationModelSelection.model,
+                         settings.textGenerationModelSelection.options,
+                       )
+                     : null,
+-                })
++                )
++              }
++              aria-label={
++                fallback ? "Use a fallback cleanup model" : "Use a separate cleanup model"
+               }
+-              aria-label="Use a separate cleanup model"
+             />
+           </div>
+         )
+@@ -1307,6 +1333,8 @@ export function VoiceSettingsPanel() {
+             : undefined,
+         "speech-post-processing-model":
+           cleanupEnabled && settingsScope ? undefined : "speech-post-processing",
++        "speech-post-processing-fallback-model":
++          cleanupEnabled && settingsScope ? undefined : "speech-post-processing",
+         "speech-correction-word": cleanupEnabled ? undefined : "speech-post-processing",
+       }}
+     >
+@@ -1693,6 +1721,7 @@ export function VoiceSettingsPanel() {
+           </SettingsRow>
+         ) : null}
+         {cleanupEnabled && settingsScope !== null ? <CleanupModelRow /> : null}
++        {cleanupEnabled && settingsScope !== null ? <CleanupModelRow fallback /> : null}
+         {cleanupEnabled ? (
+           <SettingsRow
+             {...searchableSetting("speech-correction-word")}
+diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
+index 154ad97bae..ce14077c0a 100644
+--- a/apps/web/src/components/settings/settingsSearch.ts
++++ b/apps/web/src/components/settings/settingsSearch.ts
+@@ -587,6 +587,13 @@ export const SETTINGS_SEARCH_ITEMS = [
+     scope: "environment",
+     searchTerms: ["speech voice transcript cleanup provider model post-processing"],
+   },
++  {
++    id: "speech-post-processing-fallback-model",
++    title: "Fallback cleanup model",
++    to: "/settings/voice",
++    scope: "environment",
++    searchTerms: ["speech voice transcript cleanup fallback backup model usage limit credits"],
++  },
+   {
+     id: "speech-correction-word",
+     title: "Correction cue",
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 678f58294c..466e74aa73 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -1412,6 +1412,10 @@ export const ServerSettings = Schema.Struct({
+   speechPostProcessingModelSelection: Schema.NullOr(ModelSelection).pipe(
+     Schema.withDecodingDefault(Effect.succeed(null)),
+   ),
++  // Null keeps T3's own fallback chain; a selection is tried first when the cleanup model cannot run.
++  speechPostProcessingFallbackModelSelection: Schema.NullOr(ModelSelection).pipe(
++    Schema.withDecodingDefault(Effect.succeed(null)),
++  ),
+   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
+     Schema.withDecodingDefault(Effect.succeed({})),
+   ),
+@@ -1870,6 +1874,7 @@ export const ServerSettingsPatch = Schema.Struct({
+   speechModelUnloadTimeout: Schema.optionalKey(SpeechModelUnloadTimeout),
+   speechProjectCustomWords: Schema.optionalKey(SpeechCustomWords),
+   speechPostProcessingModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
++  speechPostProcessingFallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+   projectAgentBrowserAccessOverrides: Schema.optionalKey(
+     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
+   ),
+diff --git a/packages/shared/src/serverSettings.test.ts b/packages/shared/src/serverSettings.test.ts
+index 9836fe10fc..adc0ee78ea 100644
+--- a/packages/shared/src/serverSettings.test.ts
++++ b/packages/shared/src/serverSettings.test.ts
+@@ -394,6 +394,35 @@ describe("serverSettings helpers", () => {
+     }
+   });
+ 
++  it("hands a disabled cleanup model to the chosen cleanup fallback before the text model", () => {
++    const cleanup = createModelSelection(ProviderInstanceId.make("codex_off"), "gpt-6.1-terra");
++    const fallback = createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol");
++    const settings = (fallbackEnabled: boolean) => ({
++      ...DEFAULT_SERVER_SETTINGS,
++      providerInstances: {
++        [cleanup.instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: false },
++        [fallback.instanceId]: {
++          driver: ProviderDriverKind.make("codex"),
++          enabled: fallbackEnabled,
++        },
++      },
++      speechPostProcessingModelSelection: cleanup,
++      speechPostProcessingFallbackModelSelection: fallback,
++    });
++
++    expect(resolveSpeechPostProcessingModelSelection(settings(true))).toBe(fallback);
++    expect(resolveSpeechPostProcessingModelSelection(settings(false))).toBe(
++      DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
++    );
++    // With no cleanup model, cleanup follows the text model and the fallback is not used.
++    expect(
++      resolveSpeechPostProcessingModelSelection({
++        ...settings(true),
++        speechPostProcessingModelSelection: null,
++      }),
++    ).toBe(DEFAULT_SERVER_SETTINGS.textGenerationModelSelection);
++  });
++
+   it("falls back from a writer provider that cannot generate application text", () => {
+     const instanceId = ProviderInstanceId.make("acp_writer");
+     const sourceControlWriterModelSelection = createModelSelection(instanceId, "default");
+diff --git a/packages/shared/src/serverSettings.ts b/packages/shared/src/serverSettings.ts
+index 023c6eb743..3d6cc2e1df 100644
+--- a/packages/shared/src/serverSettings.ts
++++ b/packages/shared/src/serverSettings.ts
+@@ -166,12 +166,15 @@ export function resolveSpeechPostProcessingModelSelection(
+   settings: ServerSettings,
+   providers?: ReadonlyArray<ServerProvider>,
+ ): ModelSelection {
+-  const selection = settings.speechPostProcessingModelSelection;
+-  return selection &&
++  const usable = (selection: ModelSelection | null): selection is ModelSelection =>
++    selection !== null &&
+     isModelSelectionProviderEnabled(settings, selection) &&
+-    isTextGenerationTargetUsable(settings, providers, selection.instanceId)
+-    ? selection
+-    : settings.textGenerationModelSelection;
++    isTextGenerationTargetUsable(settings, providers, selection.instanceId);
++  const selection = settings.speechPostProcessingModelSelection;
++  const fallback = settings.speechPostProcessingFallbackModelSelection;
++  if (usable(selection)) return selection;
++  // A cleanup model that cannot run hands over to the chosen fallback before the text model.
++  return selection !== null && usable(fallback) ? fallback : settings.textGenerationModelSelection;
+ }
+ 
+ export interface PersistedServerObservabilitySettings {
+@@ -609,6 +612,12 @@ export function applyServerSettingsPatch(
+     ...(patch.speechPostProcessingModelSelection !== undefined
+       ? { speechPostProcessingModelSelection: patch.speechPostProcessingModelSelection }
+       : {}),
++    ...(patch.speechPostProcessingFallbackModelSelection !== undefined
++      ? {
++          speechPostProcessingFallbackModelSelection:
++            patch.speechPostProcessingFallbackModelSelection,
++        }
++      : {}),
+     ...(patch.defaultProjectScripts !== undefined
+       ? { defaultProjectScripts: patch.defaultProjectScripts }
+       : {}),

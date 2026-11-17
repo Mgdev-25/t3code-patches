@@ -1,0 +1,186 @@
+diff --git a/apps/server/src/provider/codexUsageLimits.test.ts b/apps/server/src/provider/codexUsageLimits.test.ts
+index 3a5cae4a9d..066e5c121f 100644
+--- a/apps/server/src/provider/codexUsageLimits.test.ts
++++ b/apps/server/src/provider/codexUsageLimits.test.ts
+@@ -78,6 +78,51 @@ describe("codexRateLimitsToLimits", () => {
+     ).toBeUndefined();
+   });
+ 
++  it.each([
++    [{ hasCredits: true, unlimited: false }, undefined],
++    [{ hasCredits: false, unlimited: true }, undefined],
++    [{ hasCredits: false, unlimited: false }, "secondary"],
++    [null, "secondary"],
++  ] as const)(
++    "lets credits %o carry Codex past a full weekly window (blocks: %s)",
++    (credits, blockedBy) => {
++      const usageLimits = codexRateLimitsToLimits({
++        checkedAt,
++        snapshot: {
++          limitId: "codex",
++          planType: "plus",
++          primary: { usedPercent: 3, resetsAt: 1_784_000_000, windowDurationMins: 300 },
++          secondary: { usedPercent: 100, resetsAt: 1_784_500_000, windowDurationMins: 10080 },
++          credits,
++        },
++      });
++      // The usage bar keeps the real percent.
++      expect(usageLimits.windows.find((window) => window.id === "secondary")?.usedPercent).toBe(
++        100,
++      );
++      expect(
++        exhaustedUsageWindow(
++          {
++            instanceId: ProviderInstanceId.make("codex"),
++            driver: ProviderDriverKind.make("codex"),
++            enabled: true,
++            installed: true,
++            version: null,
++            status: "ready",
++            auth: { status: "authenticated" },
++            checkedAt,
++            models: [],
++            slashCommands: [],
++            skills: [],
++            usageLimits,
++          },
++          Date.parse(checkedAt),
++          "gpt-6.1-terra",
++        )?.id,
++      ).toBe(blockedBy);
++    },
++  );
++
+   it("maps primary and secondary onto the session and weekly windows", () => {
+     expect(
+       codexRateLimitsToLimits({
+diff --git a/apps/server/src/provider/codexUsageLimits.ts b/apps/server/src/provider/codexUsageLimits.ts
+index 5268523320..669e1d6703 100644
+--- a/apps/server/src/provider/codexUsageLimits.ts
++++ b/apps/server/src/provider/codexUsageLimits.ts
+@@ -26,6 +26,10 @@ export interface CodexRateLimitSnapshot {
+     readonly remainingPercent: number;
+     readonly resetsAt: number;
+   } | null;
++  readonly credits?: {
++    readonly hasCredits: boolean;
++    readonly unlimited: boolean;
++  } | null;
+ }
+ 
+ export interface CodexResetCreditsSummary {
+@@ -123,13 +127,18 @@ export function codexRateLimitsToLimits(input: {
+   readonly checkedAt: string;
+ }): ServerProviderUsageLimits {
+   const resetCredits = codexResetCreditsToContract(input.resetCredits);
+-  const windows = codexRateLimitsToWindows(input.rateLimitsByLimitId?.codex ?? input.snapshot);
++  const snapshot = input.rateLimitsByLimitId?.codex ?? input.snapshot;
++  const windows = codexRateLimitsToWindows(snapshot);
++  const credits = snapshot.credits ?? input.snapshot.credits;
+   return {
+     ...makeUsageLimits({
+       checkedAt: input.checkedAt,
+       windows,
+     }),
+     ...(resetCredits ? { resetCredits } : {}),
++    ...(credits
++      ? { credits: { hasCredits: credits.hasCredits, unlimited: credits.unlimited } }
++      : {}),
+   };
+ }
+ 
+diff --git a/packages/contracts/src/providerUsageLimits.ts b/packages/contracts/src/providerUsageLimits.ts
+index 446d4f1f31..729abcc63d 100644
+--- a/packages/contracts/src/providerUsageLimits.ts
++++ b/packages/contracts/src/providerUsageLimits.ts
+@@ -51,6 +51,13 @@ export const ServerProviderUsageLimits = Schema.Struct({
+   zeroSpendCap: Schema.optional(Schema.Boolean),
+   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
+   resetCredits: Schema.optional(ServerProviderResetCredits),
++  /** Codex keeps running on credits past a full plan window while either flag is true. */
++  credits: Schema.optional(
++    Schema.Struct({
++      hasCredits: Schema.Boolean,
++      unlimited: Schema.Boolean,
++    }),
++  ),
+   externalUsage: Schema.optional(
+     Schema.Struct({
+       label: TrimmedNonEmptyString,
+diff --git a/packages/provider-core/src/server/usageLimits.test.ts b/packages/provider-core/src/server/usageLimits.test.ts
+index 5004134f46..5a12ad7e40 100644
+--- a/packages/provider-core/src/server/usageLimits.test.ts
++++ b/packages/provider-core/src/server/usageLimits.test.ts
+@@ -187,6 +187,24 @@ describe("applyUsageLimitsUpdate", () => {
+       zeroSpendCap: true,
+     });
+   });
++
++  it("keeps the Codex credit flags when a streamed or replaced window set arrives", () => {
++    const credits = { hasCredits: true, unlimited: false };
++    const streamed = applyUsageLimitsUpdate({
++      previous: { ...published, credits },
++      checkedAt: "2026-09-03T12:00:05.000Z",
++      update: { windows: [{ ...weekly, usedPercent: 100 }] },
++    });
++    const replaced = applyUsageLimitsUpdate({
++      previous: { ...published, credits },
++      checkedAt: "2026-09-03T12:00:05.000Z",
++      update: { windows: [session] },
++      replace: true,
++    });
++
++    expect(streamed?.credits).toEqual(credits);
++    expect(replaced?.credits).toEqual(credits);
++  });
+ });
+ 
+ describe("resolveUsageLimitsAfterProbe", () => {
+diff --git a/packages/provider-core/src/server/usageLimits.ts b/packages/provider-core/src/server/usageLimits.ts
+index d5a7619e0d..d29b9435b6 100644
+--- a/packages/provider-core/src/server/usageLimits.ts
++++ b/packages/provider-core/src/server/usageLimits.ts
+@@ -72,7 +72,11 @@ export function applyUsageLimitsUpdate(input: {
+       previous.windows.every((window, index) => usageWindowEquals(window, next.windows[index]!))
+     )
+       return previous;
+-    return { ...next, ...(previous?.resetCredits ? { resetCredits: previous.resetCredits } : {}) };
++    return {
++      ...next,
++      ...(previous?.resetCredits ? { resetCredits: previous.resetCredits } : {}),
++      ...(previous?.credits ? { credits: previous.credits } : {}),
++    };
+   }
+   if (update.windows.length === 0) {
+     return previous;
+@@ -105,6 +109,7 @@ export function applyUsageLimitsUpdate(input: {
+   return {
+     ...makeUsageLimits({ checkedAt: input.checkedAt, windows: merged.values() }),
+     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
++    ...(previous?.credits !== undefined ? { credits: previous.credits } : {}),
+     ...(previous?.zeroSpendCap ? { zeroSpendCap: true } : {}),
+     ...(unavailable !== undefined ? { unavailable } : {}),
+   };
+diff --git a/packages/shared/src/usageLimits.ts b/packages/shared/src/usageLimits.ts
+index 6fe6c70a89..b6fe5398b9 100644
+--- a/packages/shared/src/usageLimits.ts
++++ b/packages/shared/src/usageLimits.ts
+@@ -64,10 +64,15 @@ export function exhaustedUsageWindow(
+     }
+     case "codex": {
+       // Seat-based plans spend credits only past their plan windows, so the credit cap blocks only plans without them.
+-      const hasPlanWindows = windows.some(
+-        (window) => window.id === "primary" || window.id === "secondary",
++      const isPlanWindow = (window: ServerProviderUsageWindow) =>
++        window.id === "primary" || window.id === "secondary";
++      const hasPlanWindows = windows.some(isPlanWindow);
++      // Codex runs on credits past a full plan window, as long as credits remain.
++      const credits = provider?.usageLimits?.credits;
++      const onCredits = credits?.hasCredits === true || credits?.unlimited === true;
++      return exhausted.find((window) =>
++        isPlanWindow(window) ? !onCredits : window.id !== "individual" || !hasPlanWindows,
+       );
+-      return exhausted.find((window) => window.id !== "individual" || !hasPlanWindows);
+     }
+     case "opencode":
+       return exhausted.find(

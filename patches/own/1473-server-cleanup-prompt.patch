@@ -1,0 +1,165 @@
+diff --git a/apps/server/src/speech/http.test.ts b/apps/server/src/speech/http.test.ts
+index 07f2fe6b99..f9eef2665f 100644
+--- a/apps/server/src/speech/http.test.ts
++++ b/apps/server/src/speech/http.test.ts
+@@ -26,6 +26,7 @@ import * as HttpServer from "effect/http/HttpServer";
+ import * as HttpApi from "effect/http-api/HttpApi";
+ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+ import type * as NetAddress from "effect/net/NetAddress";
++import { ServerConfig } from "../config.ts";
+ import * as SpeechService from "./SpeechService.ts";
+ import * as CloudSpeech from "./CloudSpeech.ts";
+ import * as ServerSettings from "../serverSettings.ts";
+@@ -49,6 +50,10 @@ const principal = (...scopes: AuthEnvironmentScope[]) =>
+ 
+ const dependencies = Layer.mergeAll(
+   Layer.mock(CloudSpeech.CloudSpeech)({}),
++  // Cleanup reads its server prompt file here; none exists, so it keeps the built-in prompt.
++  Layer.succeed(ServerConfig, {
++    stateDir: "/nonexistent/t3-speech-http-test",
++  } as ServerConfig["Service"]),
+   Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+   Layer.mock(ServerSettings.ServerSettingsService)({
+     getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+diff --git a/apps/server/src/speech/postProcessing.test.ts b/apps/server/src/speech/postProcessing.test.ts
+index 3dd64c9b1b..b498592b31 100644
+--- a/apps/server/src/speech/postProcessing.test.ts
++++ b/apps/server/src/speech/postProcessing.test.ts
+@@ -1,10 +1,18 @@
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { assert, it } from "@effect/vitest";
+-import { ProviderInstanceId, type ModelSelection } from "@t3tools/contracts";
++import {
++  DEFAULT_SPEECH_POST_PROCESSING_PROMPT,
++  ProviderInstanceId,
++  type ModelSelection,
++  type SpeechPostProcessingPromptSettings,
++} from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
+ import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
+ import * as Ref from "effect/Ref";
+ 
++import { ServerConfig } from "../config.ts";
+ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+ import * as ServerSettings from "../serverSettings.ts";
+ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+@@ -59,6 +67,7 @@ it.effect("cleanup pinned to a provider that cannot generate text uses the text
+           speechPostProcessingModelSelection: acpSelection,
+         }),
+       ),
++      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-voice-cleanup-test-" })),
+       Layer.provide(NodeServices.layer),
+     );
+     yield* Effect.gen(function* () {
+@@ -79,3 +88,63 @@ it.effect("cleanup pinned to a provider that cannot generate text uses the text
+     );
+   }),
+ );
++
++it.effect.each([
++  ["default", "", "Server prompt from the file.", "Server prompt from the file."],
++  ["default", "", "  \n", DEFAULT_SPEECH_POST_PROCESSING_PROMPT],
++  ["default", "", null, DEFAULT_SPEECH_POST_PROCESSING_PROMPT],
++  ["custom", "Client prompt.", "Server prompt from the file.", "Client prompt."],
++  ["custom", "  ", "Server prompt from the file.", "Server prompt from the file."],
++] as const)(
++  "a %s prompt %j with server prompt file %j cleans with %j",
++  ([mode, customInstructions, fileText, expected]) =>
++    Effect.gen(function* () {
++      const prompt = yield* Ref.make("");
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-voice-prompt-" });
++      // ServerConfig puts the userdata folder of a base folder at `<baseDir>/userdata`.
++      yield* fs.makeDirectory(path.join(baseDir, "userdata"));
++      if (fileText !== null) {
++        yield* fs.writeFileString(
++          path.join(baseDir, "userdata", SpeechPostProcessing.SERVER_PROMPT_FILE),
++          fileText,
++        );
++      }
++      const layer = SpeechPostProcessing.layer.pipe(
++        Layer.provide(
++          Layer.succeed(TextGeneration.TextGeneration, {
++            generateTranscriptionPostProcessing: (input: { prompt: string }) =>
++              Ref.set(prompt, input.prompt).pipe(Effect.as({ transcription: "Hello." })),
++          } as unknown as TextGeneration.TextGeneration["Service"]),
++        ),
++        Layer.provide(
++          Layer.succeed(ProviderRegistry.ProviderRegistry, {
++            getProviders: Effect.succeed([]),
++          } as unknown as ProviderRegistry.ProviderRegistry["Service"]),
++        ),
++        Layer.provide(
++          ServerSettings.layerTest({ textGenerationModelSelection: textGenerationSelection }),
++        ),
++        Layer.provide(ServerConfig.layerTest(baseDir, baseDir)),
++        Layer.provide(NodeServices.layer),
++      );
++      const speechPostProcessingPrompt: SpeechPostProcessingPromptSettings = {
++        mode,
++        customInstructions,
++      };
++      yield* Effect.gen(function* () {
++        const postProcessing = yield* SpeechPostProcessing.SpeechPostProcessing;
++        yield* postProcessing.process({
++          options: { speechCustomWords: [], speechPostProcessingPrompt },
++          transcript: "um hello",
++          draft: { text: "", selection: { start: 0, end: 0 } },
++        });
++      }).pipe(Effect.provide(layer));
++      const sent = yield* Ref.get(prompt);
++      assert.include(sent, expected);
++      if (expected !== DEFAULT_SPEECH_POST_PROCESSING_PROMPT) {
++        assert.notInclude(sent, DEFAULT_SPEECH_POST_PROCESSING_PROMPT);
++      }
++    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
++);
+diff --git a/apps/server/src/speech/postProcessing.ts b/apps/server/src/speech/postProcessing.ts
+index 92f4af1769..3c3f162a3a 100644
+--- a/apps/server/src/speech/postProcessing.ts
++++ b/apps/server/src/speech/postProcessing.ts
+@@ -6,8 +6,10 @@ import * as Context from "effect/Context";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
+ import { resolveSpeechPostProcessingModelSelection } from "@t3tools/shared/serverSettings";
+ 
++import { ServerConfig } from "../config.ts";
+ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+ import * as ServerSettings from "../serverSettings.ts";
+ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+@@ -15,6 +17,9 @@ import { buildTranscriptionPostProcessingPrompt } from "../textGeneration/Transc
+ import { applySpeechAliases } from "./customWords.ts";
+ import { SpeechOperationError } from "./SpeechService.ts";
+ 
++/** In the server's userdata folder. Its text replaces the built-in prompt for every client. */
++export const SERVER_PROMPT_FILE = "voice-cleanup-prompt.txt";
++
+ export class SpeechPostProcessing extends Context.Service<
+   SpeechPostProcessing,
+   {
+@@ -29,6 +34,12 @@ const make = Effect.gen(function* () {
+   const fileSystem = yield* FileSystem.FileSystem;
+   const textGeneration = yield* TextGeneration.TextGeneration;
+   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
++  const promptFile = (yield* Path.Path).join((yield* ServerConfig).stateDir, SERVER_PROMPT_FILE);
++  // Read on each cleanup, so an edit of the file applies without a restart.
++  const serverPrompt = fileSystem.readFileString(promptFile).pipe(
++    Effect.map((text) => text.trim()),
++    Effect.orElseSucceed(() => ""),
++  );
+   return SpeechPostProcessing.of({
+     process: Effect.fn("SpeechPostProcessing.process")(
+       function* (input) {
+@@ -38,6 +49,7 @@ const make = Effect.gen(function* () {
+         const { mode, customInstructions } = input.options.speechPostProcessingPrompt;
+         const instructions =
+           (mode === "custom" ? customInstructions.trim() : "") ||
++          (yield* serverPrompt) ||
+           DEFAULT_SPEECH_POST_PROCESSING_PROMPT;
+         // Providers run in a working directory; cleanup must not read a checkout.
+         const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-voice-cleanup-" });
