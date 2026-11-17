@@ -1,8 +1,8 @@
 diff --git a/apps/server/src/textGeneration/CodexTextGeneration.test.ts b/apps/server/src/textGeneration/CodexTextGeneration.test.ts
-index 1a1a5c43b0..2d9b6775ce 100644
+index 1a1a5c43b0..2cb600d11d 100644
 --- a/apps/server/src/textGeneration/CodexTextGeneration.test.ts
 +++ b/apps/server/src/textGeneration/CodexTextGeneration.test.ts
-@@ -786,6 +786,130 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
+@@ -786,6 +786,156 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
    }),
  );
  
@@ -13,6 +13,8 @@ index 1a1a5c43b0..2d9b6775ce 100644
 +  ["fallback signed out", "chain"],
 +  ["no fallback set", "chain"],
 +  ["thread title ignores the fallback", "chain"],
++  ["fallback text generator on", "generator"],
++  ["fallback text generator off", "chain"],
 +] as const;
 +
 +it.effect.each(CLEANUP_FALLBACK_CASES)(
@@ -24,12 +26,18 @@ index 1a1a5c43b0..2d9b6775ce 100644
 +      const fallback = ProviderInstanceId.make("muse_cleanup");
 +      const selection = { instanceId: primary, model: "gpt-6.1-terra" };
 +      const threadDefault = { instanceId: chain, model: "claude-haiku-5-5" };
-+      const fallbackSelection = { instanceId: fallback, model: "muse-ember-1.0" };
++      const generator = ProviderInstanceId.make("api_cleanup");
++      const usesGenerator = state.startsWith("fallback text generator");
++      const fallbackSelection = usesGenerator
++        ? { instanceId: generator, model: "api-model" }
++        : { instanceId: fallback, model: "muse-ember-1.0" };
 +      const exhausted = {
 +        checkedAt: "1970-01-01T00:00:00Z",
 +        windows: [{ id: "secondary", kind: "weekly" as const, label: "Weekly", usedPercent: 100 }],
 +      };
 +      const calls: ModelSelection[] = [];
++      const record = (modelSelection: ModelSelection) =>
++        Effect.sync(() => calls.push(modelSelection));
 +      const instances: ProviderInstance[] = [primary, chain, fallback].map((instanceId) => {
 +        const driver = ProviderDriverKind.make(
 +          instanceId === primary ? "codex" : instanceId === chain ? "claudeAgent" : "muse",
@@ -56,8 +64,6 @@ index 1a1a5c43b0..2d9b6775ce 100644
 +            ? { status: "error", auth: { status: "unauthenticated" } }
 +            : {}),
 +        };
-+        const record = (modelSelection: ModelSelection) =>
-+          Effect.sync(() => calls.push(modelSelection));
 +        return {
 +          instanceId,
 +          driverKind: driver,
@@ -94,11 +100,31 @@ index 1a1a5c43b0..2d9b6775ce 100644
 +                },
 +                [fallback]: { driver: ProviderDriverKind.make("muse"), enabled: true },
 +              },
++              textGenerators: {
++                [generator]: {
++                  kind: "openaiCompatible",
++                  baseUrl: "http://127.0.0.1:18999/v1",
++                  enabled: state === "fallback text generator on",
++                },
++              },
 +              defaultModelSelection: threadDefault,
 +              speechPostProcessingFallbackModelSelection:
 +                state === "no fallback set" ? null : fallbackSelection,
 +            }),
-+            Layer.mock(TextGenerators.TextGenerators)({ runner: () => Effect.undefined }),
++            Layer.mock(TextGenerators.TextGenerators)({
++              // The real runner of a generator that is off only fails.
++              runner: (id) =>
++                Effect.succeed(
++                  id === generator
++                    ? (((request: { readonly modelSelection: ModelSelection }) =>
++                        state === "fallback text generator on"
++                          ? record(request.modelSelection).pipe(
++                              Effect.as({ transcription: "Hello." }),
++                            )
++                          : Effect.die("a generator that is off ran")) as never)
++                    : undefined,
++                ),
++            }),
 +            Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
 +              resolveLink: () => Effect.die("unused"),
 +            }),
@@ -123,7 +149,7 @@ index 1a1a5c43b0..2d9b6775ce 100644
 +      expect(calls).toEqual([
 +        expected === "primary"
 +          ? selection
-+          : expected === "fallback"
++          : expected === "fallback" || expected === "generator"
 +            ? fallbackSelection
 +            : threadDefault,
 +      ]);
@@ -134,10 +160,18 @@ index 1a1a5c43b0..2d9b6775ce 100644
    "a review guide aimed at a text generator falls back to an agent that can read the checkout",
    () =>
 diff --git a/apps/server/src/textGeneration/TextGeneration.ts b/apps/server/src/textGeneration/TextGeneration.ts
-index c91aa0623d..2f9d4504c3 100644
+index c91aa0623d..34dce2cdc0 100644
 --- a/apps/server/src/textGeneration/TextGeneration.ts
 +++ b/apps/server/src/textGeneration/TextGeneration.ts
-@@ -124,26 +124,53 @@ export const make = Effect.gen(function* () {
+@@ -6,6 +6,7 @@ import {
+   isProviderAvailable,
+   isProviderTextGenerationCapable,
+   resolveProjectProviderInstanceEnabled,
++  textGeneratorForSelection,
+ } from "@t3tools/contracts";
+ import * as DateTime from "effect/DateTime";
+ import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
+@@ -124,26 +125,57 @@ export const make = Effect.gen(function* () {
              }),
          ),
        );
@@ -160,7 +194,11 @@ index c91aa0623d..2f9d4504c3 100644
 +        operation === "generateTranscriptionPostProcessing"
 +          ? settings.speechPostProcessingFallbackModelSelection
 +          : null;
-+      if (preferred !== null) {
++      // A text generator that is off only fails, so T3's chain runs instead.
++      if (
++        preferred !== null &&
++        textGeneratorForSelection(settings, preferred.instanceId)?.enabled === true
++      ) {
 +        const runner = yield* textGenerators.runner(preferred.instanceId);
 +        if (runner !== undefined) {
 +          return yield* invoke(
