@@ -22,6 +22,6 @@ first. Then act on each fault:
   60 days with no repo activity). Turn it on and run it.
 
 Write nothing to pingdotgg/t3code. Own patches stay at most 8, bug fixes only,
-each with its Shell issue, its check and a `dropWhen` line. The one feature
-exception is `1448-form-free-text-mic` (Shell issue 1448). Rebase it like a
+each with its Shell issue, its check and a `dropWhen` line. The feature
+exceptions that Morgan allowed are listed in `README.md`. Rebase them like a
 bug fix, and add no other feature.

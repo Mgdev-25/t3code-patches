@@ -15,6 +15,8 @@ decisions.
     question form, in Shell issue 1448.
   - `1456-notice-hold`, the child end notice hold, on 2026-11-16 in
     [Shell issue 1456](https://github.com/Mgdev-25/shell/issues/1456).
+  - `1474-cleanup-fallback-model`, the fallback model of the voice cleanup,
+    on 2026-11-17 in [Shell issue 1210](https://github.com/Mgdev-25/shell/issues/1210#issuecomment-6951291746).
 - `.github/workflows/nightly.yml` runs with no model. Its cron asks for a run
   every 30 minutes, but GitHub drops most of these runs. So the Shell timer
   `patch-store-gate` on Morgan's PC also starts it for each new nightly with no
