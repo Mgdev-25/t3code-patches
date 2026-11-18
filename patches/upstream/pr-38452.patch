@@ -1,0 +1,38 @@
+diff --git a/apps/mobile/index.ts b/apps/mobile/index.ts
+index 756c69e52176..64065bb9d0d1 100644
+--- a/apps/mobile/index.ts
++++ b/apps/mobile/index.ts
+@@ -1,6 +1,9 @@
+ // Must stay first: the render counter and behavior probe wrap the DevTools hook before any React commit.
+ import "./src/features/development/render-counter-entry";
+ import "./src/features/development/behavior-probe-entry";
++// Before any GT module initializes: GT captures Intl when it loads and validates locales with
++// APIs Hermes lacks. observe.ts can load GT through the persistence graph.
++import "./src/i18n/intl-polyfills";
+ // Next, so errors thrown while the rest of the app loads are recorded too.
+ import "./src/features/observability/observe";
+ import { registerRootComponent } from "expo";
+@@ -8,8 +11,6 @@ import "react-native-gesture-handler";
+ import { LogBox } from "react-native";
+ import { featureFlags } from "react-native-screens";
+ 
+-// Before any GT module initializes: GT validates locales with Intl APIs that Hermes lacks.
+-import "./src/i18n/intl-polyfills";
+ import App from "./src/App";
+ 
+ // Enables iOS FormSheet sizing for nested native stacks in non-fitToContents sheets.
+diff --git a/apps/mobile/src/features/observability/observe.ts b/apps/mobile/src/features/observability/observe.ts
+index fbbb5e22b833..0a41f2f16d10 100644
+--- a/apps/mobile/src/features/observability/observe.ts
++++ b/apps/mobile/src/features/observability/observe.ts
+@@ -44,8 +44,8 @@ if (!crashReportingAvailable) {
+   void setCrashReportsEnabled(false);
+ } else {
+   // Observe keeps its last configuration across launches; configuring it off while the setting
+-  // loads would drop the last session's native crash. Imported lazily so the persistence graph
+-  // never runs ahead of the imports `index.ts` orders first.
++  // loads would drop the last session's native crash. Release builds have no split bundles, so
++  // Metro evaluates this import synchronously, ahead of the rest of `index.ts`.
+   const changedSinceLoad = () => latestConfiguration !== 0;
+   void import("../../persistence/imperative")
+     .then(({ loadPreferences }) => loadPreferences())
