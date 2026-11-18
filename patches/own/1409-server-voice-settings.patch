@@ -20,10 +20,10 @@ index 6e891dd04e..0fef0a8942 100644
        const route = registry.get(voiceRouteAtom);
        if (route) return route.transcriber;
 diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
-index a6f48d6959..031f9d1d58 100644
+index 787420306a..1d66bfbf41 100644
 --- a/apps/mobile/src/features/voice-input/voiceDestination.ts
 +++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
-@@ -3,6 +3,7 @@ import {
+@@ -6,6 +6,7 @@ import {
    type CloudSpeechModelId,
    type CloudSpeechProvider,
    type EnvironmentId,
@@ -31,7 +31,7 @@ index a6f48d6959..031f9d1d58 100644
    DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
    type VoiceTranscriptionDestination,
  } from "@t3tools/contracts";
-@@ -11,6 +12,7 @@ import {
+@@ -14,6 +15,7 @@ import {
    getCloudSpeechKeys,
    getCloudSpeechModels,
    requireCloudSpeechKey,
@@ -39,7 +39,7 @@ index a6f48d6959..031f9d1d58 100644
    transcribeCloudPcm,
    getEnvironmentSpeechStatus,
    transcribeEnvironmentPcm,
-@@ -140,6 +142,7 @@ function environmentTranscriber(
+@@ -143,6 +145,7 @@ function environmentTranscriber(
    prepared: PreparedConnection,
    canSend: () => boolean,
    speechLanguage: string,
@@ -47,7 +47,7 @@ index a6f48d6959..031f9d1d58 100644
    cloud?: CloudDestination,
  ) {
    const provider = cloud?.provider;
-@@ -193,7 +196,11 @@ function environmentTranscriber(
+@@ -199,7 +202,11 @@ function environmentTranscriber(
              : transcribeEnvironmentPcm(
                  prepared,
                  pcm,
@@ -60,7 +60,7 @@ index a6f48d6959..031f9d1d58 100644
                  canSend,
                ),
            signal,
-@@ -203,6 +210,37 @@ function environmentTranscriber(
+@@ -209,6 +216,37 @@ function environmentTranscriber(
    });
  }
  
@@ -98,7 +98,7 @@ index a6f48d6959..031f9d1d58 100644
  const speechAtom = <A, E>(
    id: EnvironmentId,
    read: (prepared: PreparedConnection) => Effect.Effect<A, E, HttpClient.HttpClient>,
-@@ -257,6 +295,13 @@ export const voiceRouteAtom = Atom.make((get) => {
+@@ -263,6 +301,13 @@ export const voiceRouteAtom = Atom.make((get) => {
    const connection = get(connectionAtom);
    const speechLanguage = get(speechLanguageAtom);
    const registry = get.registry;
@@ -112,7 +112,7 @@ index a6f48d6959..031f9d1d58 100644
    return {
      transcriber:
        connection &&
-@@ -264,6 +309,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+@@ -270,6 +315,7 @@ export const voiceRouteAtom = Atom.make((get) => {
          connection,
          () => registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection,
          speechLanguage,
