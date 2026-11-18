@@ -1,8 +1,8 @@
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 45b4ad2d6a..adffaceeea 100644
+index 9ed0f19d8a..0d62a664d0 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-@@ -81,6 +81,8 @@ export function QuestionAttachments(props: {
+@@ -85,6 +85,8 @@ export function QuestionAttachments(props: {
    const inputRef = useRef<TextInputInstance>(null);
    const [input, setInput] = useState(() => ({ text: props.value, version: 0 }));
    const nativeText = useRef(props.value);
@@ -11,7 +11,7 @@ index 45b4ad2d6a..adffaceeea 100644
    const [selection, setSelection] = useState<ComposerEditorSelection>(() => ({
      start: props.value.length,
      end: props.value.length,
-@@ -107,6 +109,7 @@ export function QuestionAttachments(props: {
+@@ -111,6 +113,7 @@ export function QuestionAttachments(props: {
          focusedRef.current = false;
          onInputFocusChange?.(false);
        }
@@ -19,7 +19,7 @@ index 45b4ad2d6a..adffaceeea 100644
        nativeText.current = text;
        setInput((current) => ({ text, version: current.version + 1 }));
        props.onChangeText(text);
-@@ -123,6 +126,13 @@ export function QuestionAttachments(props: {
+@@ -127,6 +130,13 @@ export function QuestionAttachments(props: {
      inputRef.current?.clear();
      setSelection({ start: 0, end: 0 });
    }, [props.value]);
@@ -33,7 +33,7 @@ index 45b4ad2d6a..adffaceeea 100644
    const append = (
      key: string,
      attachments: Parameters<typeof appendComposerDraftAttachments>[1],
-@@ -265,6 +275,7 @@ export function QuestionAttachments(props: {
+@@ -269,6 +279,7 @@ export function QuestionAttachments(props: {
                submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
                editable={!props.disabled && !voice.freezesEditor}
                onChangeText={(text) => {
@@ -138,10 +138,10 @@ index 12b9a555e6..b4da8aabb1 100644
 +  screen.unmount();
 +});
 diff --git a/apps/mobile/src/state/use-selected-thread-requests.ts b/apps/mobile/src/state/use-selected-thread-requests.ts
-index 776a3faf51..0ec0e7b701 100644
+index b75faf6da9..c3c25b3fa3 100644
 --- a/apps/mobile/src/state/use-selected-thread-requests.ts
 +++ b/apps/mobile/src/state/use-selected-thread-requests.ts
-@@ -34,7 +34,6 @@ import {
+@@ -39,7 +39,6 @@ import {
    userInputDraftKey,
  } from "@t3tools/client-runtime/state/thread-requests";
  import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -149,7 +149,7 @@ index 776a3faf51..0ec0e7b701 100644
  
  import { environmentThreadDetails, threadEnvironment } from "./threads";
  import {
-@@ -48,12 +47,15 @@ import { useSelectedThreadPendingRequests } from "./use-thread-detail";
+@@ -53,12 +52,15 @@ import { useSelectedThreadPendingRequests } from "./use-thread-detail";
  import { useThreadSelection } from "./use-thread-selection";
  import { useAtomCommand } from "./use-atom-command";
  import { readEnvironmentScope } from "./session";
@@ -168,7 +168,7 @@ index 776a3faf51..0ec0e7b701 100644
  
  // Writes start from the suggested answer the user was looking at.
  function seededDraft(
-@@ -69,7 +71,7 @@ function setUserInputDraftOption(
+@@ -74,7 +76,7 @@ function setUserInputDraftOption(
    value: string,
  ): void {
    const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
@@ -177,7 +177,7 @@ index 776a3faf51..0ec0e7b701 100644
      ...current,
      [requestKey]: {
        ...current[requestKey],
-@@ -88,7 +90,7 @@ function setUserInputDraftCustomAnswer(
+@@ -93,7 +95,7 @@ function setUserInputDraftCustomAnswer(
    customAnswer: string,
  ): void {
    const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
@@ -186,7 +186,7 @@ index 776a3faf51..0ec0e7b701 100644
      ...current,
      [requestKey]: {
        ...current[requestKey],
-@@ -114,7 +116,7 @@ function pruneResolvedRequestDrafts(
+@@ -119,7 +121,7 @@ function pruneResolvedRequestDrafts(
      threadId,
      pendingRequestIds,
    );

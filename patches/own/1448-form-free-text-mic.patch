@@ -70,10 +70,10 @@ index 8dcfb78747..e6baec4ea1 100644
 +  harness.voice = { isBusy: false, ownerKey: null };
 +});
 diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
-index a486948e18..dca5752dae 100644
+index da4179d6dd..1ce74bb398 100644
 --- a/apps/mobile/src/features/threads/PendingUserInputCard.tsx
 +++ b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
-@@ -36,6 +36,8 @@ import {
+@@ -37,6 +37,8 @@ import {
    type PendingUserInputDraftAnswer,
  } from "@t3tools/client-runtime/state/pending-user-input";
  import type { PendingUserInput } from "../../lib/threadActivity";
@@ -82,7 +82,7 @@ index a486948e18..dca5752dae 100644
  
  export interface PendingUserInputCardProps {
    readonly environmentId: EnvironmentId;
-@@ -124,6 +126,20 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+@@ -126,6 +128,20 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
    const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
    const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
    const responseDisabled = !canRespond || isResponding;
@@ -103,8 +103,8 @@ index a486948e18..dca5752dae 100644
    const setDirection = markdownProseDirection(
      props.pendingUserInput.questions
        .flatMap((question) => [
-@@ -363,7 +379,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
-         label="Submit answers"
+@@ -382,7 +398,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+         label={gt("Submit answers")}
          fullWidth
          tone={props.answers ? "primary" : "secondary"}
 -        disabled={!props.canOperateThread || responseDisabled || props.answers === null}
@@ -115,10 +115,10 @@ index a486948e18..dca5752dae 100644
        />
        {props.pendingUserInput.dismissible ? (
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 3cc26c42fd..45b4ad2d6a 100644
+index c59c1890d0..9ed0f19d8a 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-@@ -29,6 +29,17 @@ import {
+@@ -32,6 +32,17 @@ import {
    questionAttachmentDraftKey,
    questionAttachmentPreparationAtom,
  } from "../../state/question-attachments";
@@ -136,7 +136,7 @@ index 3cc26c42fd..45b4ad2d6a 100644
  
  export function QuestionAttachments(props: {
    requestId: string;
-@@ -65,16 +76,52 @@ export function QuestionAttachments(props: {
+@@ -69,16 +80,52 @@ export function QuestionAttachments(props: {
    // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases keyboard ownership on unmount, since an unmounted native input never emits blur
    useEffect(() => () => releaseFocus(), []);
    // A controlled value makes Fabric rebuild the native text on every keystroke, which discards
@@ -192,7 +192,7 @@ index 3cc26c42fd..45b4ad2d6a 100644
    }, [props.value]);
    const append = (
      key: string,
-@@ -205,29 +252,79 @@ export function QuestionAttachments(props: {
+@@ -209,29 +256,79 @@ export function QuestionAttachments(props: {
        />
        <FilePreviewModal source={previewFile} onRequestClose={() => setPreviewFile(null)} />
        <VideoPreviewModal source={previewVideo} onRequestClose={() => setPreviewVideo(null)} />
@@ -215,7 +215,7 @@ index 3cc26c42fd..45b4ad2d6a 100644
 -            focusedRef.current = false;
 -            onInputFocusChange?.(false);
 -          }}
--          placeholder="Or type a custom answer"
+-          placeholder={gt("Or type a custom answer")}
 -          className="min-h-[54px] rounded-2xl border border-input-border bg-input px-3.5 py-3 font-sans text-base text-foreground"
 -        />
 -      </TextInputWrapper>
@@ -244,7 +244,7 @@ index 3cc26c42fd..45b4ad2d6a 100644
 +                focusedRef.current = false;
 +                onInputFocusChange?.(false);
 +              }}
-+              placeholder="Or type a custom answer"
++              placeholder={gt("Or type a custom answer")}
 +              className="min-h-[52px] rounded-none border-0 bg-transparent px-3.5 py-3 font-sans text-base text-foreground"
 +            />
 +          </TextInputWrapper>
@@ -504,7 +504,7 @@ index 0000000000..12b9a555e6
 +  expect(screen.changes).toEqual([]);
 +});
 diff --git a/apps/mobile/vite.config.ts b/apps/mobile/vite.config.ts
-index e9f1260b51..38b9c10d05 100644
+index c25e9aad60..36517ee4c1 100644
 --- a/apps/mobile/vite.config.ts
 +++ b/apps/mobile/vite.config.ts
 @@ -33,6 +33,7 @@ const reactTests = [

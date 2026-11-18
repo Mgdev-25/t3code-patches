@@ -1,8 +1,12 @@
 diff --git a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
-index 4b0ca00e8866..c20563851a19 100644
+index dcefd506c4..6cf5ae29fe 100644
 --- a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
 +++ b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
-@@ -3,6 +3,7 @@ import { useAtomSet, useAtomValue } from "@effect/atom-react";
+@@ -1,9 +1,10 @@
+-import { msg, useGT, useMessages } from "gt-react-native";
++import { msg, useGT, useLocale, useMessages } from "gt-react-native";
+ import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
+ import { useAtomSet, useAtomValue } from "@effect/atom-react";
  import { AsyncResult } from "effect/reactivity";
  import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync } from "expo-audio";
  import { useState } from "react";
@@ -10,7 +14,7 @@ index 4b0ca00e8866..c20563851a19 100644
  import { Linking, Platform, useWindowDimensions, View } from "react-native";
  import Reanimated, { ReduceMotion, useAnimatedStyle, withTiming } from "react-native-reanimated";
  import { useSafeAreaInsets } from "react-native-safe-area-context";
-@@ -20,6 +21,7 @@ import {
+@@ -22,6 +23,7 @@ import {
  import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
  import { ListRowLayout } from "../../components/ui/ListRowLayout";
  import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
@@ -18,7 +22,7 @@ index 4b0ca00e8866..c20563851a19 100644
  import * as Dialog from "../../components/ui/Dialog";
  import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
  import {
-@@ -27,9 +29,10 @@ import {
+@@ -29,9 +31,10 @@ import {
    cloudVoiceConnectionAtom,
    voiceConnectionAtom,
    voiceGrantAtom,
@@ -30,7 +34,7 @@ index 4b0ca00e8866..c20563851a19 100644
  import { CloudVoiceChoice } from "./CloudVoiceSection";
  import type { VoiceGrant } from "../voice-input/voiceGrantStorage";
  import type { EnvironmentId } from "@t3tools/contracts";
-@@ -203,6 +206,68 @@ function EnvironmentMethodSection({
+@@ -218,6 +221,69 @@ function EnvironmentMethodSection({
    );
  }
  
@@ -39,6 +43,7 @@ index 4b0ca00e8866..c20563851a19 100644
 +  const preferencesResult = useAtomValue(mobilePreferencesAtom);
 +  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
 +  const [open, setOpen] = useState(false);
++  const locale = useLocale();
 +  const status = AsyncResult.getOrElse(
 +    useAtomValue(voiceSpeechStatusAtom(grant.destination.environmentId)),
 +    () => null,
@@ -56,10 +61,10 @@ index 4b0ca00e8866..c20563851a19 100644
 +    ? (preferencesResult.value.speechLanguage ?? "auto")
 +    : "auto";
 +  const resolved = model ? effectiveSpeechLanguage(model, preference) : preference;
-+  const resolvedLabel = resolved === "auto" ? "Auto-detect" : languageLabel(resolved);
++  const resolvedLabel = resolved === "auto" ? "Auto-detect" : languageLabel(resolved, locale);
 +  const label =
 +    preference !== "auto" && preference !== resolved
-+      ? `${resolvedLabel} (${languageLabel(preference)} unavailable)`
++      ? `${resolvedLabel} (${languageLabel(preference, locale)} unavailable)`
 +      : preference === "auto" && resolved !== "auto"
 +        ? `Auto (${resolvedLabel})`
 +        : resolvedLabel;
@@ -76,12 +81,12 @@ index 4b0ca00e8866..c20563851a19 100644
 +            {[
 +              "auto",
 +              ...[...model.languages].sort((a, b) =>
-+                languageLabel(a).localeCompare(languageLabel(b)),
++                languageLabel(a, locale).localeCompare(languageLabel(b, locale)),
 +              ),
 +            ].map((code) => (
 +              <ListChoiceRow
 +                key={code}
-+                label={code === "auto" ? "Auto-detect" : languageLabel(code)}
++                label={code === "auto" ? "Auto-detect" : languageLabel(code, locale)}
 +                selected={preference === code}
 +                onPress={() => {
 +                  savePreferences({ speechLanguage: code });
@@ -97,9 +102,9 @@ index 4b0ca00e8866..c20563851a19 100644
 +}
 +
  export function SettingsVoiceRouteScreen() {
-   const transcriber = useAtomValue(localVoiceTranscriberAtom);
-   const grant = useAtomValue(voiceGrantAtom);
-@@ -320,6 +385,9 @@ export function SettingsVoiceRouteScreen() {
+   const gt = useGT();
+   const m = useMessages();
+@@ -337,6 +403,9 @@ export function SettingsVoiceRouteScreen() {
              }
            />
          ) : null}
@@ -107,23 +112,23 @@ index 4b0ca00e8866..c20563851a19 100644
 +          <TranscriptionLanguageSection grant={grant} />
 +        ) : null}
          {!grant && transcriber === null ? (
-           <Text className="px-2 text-sm text-foreground-muted">{UNAVAILABLE_EXPLANATION}</Text>
+           <Text className="px-2 text-sm text-foreground-muted">{m(UNAVAILABLE_EXPLANATION)}</Text>
          ) : null}
 diff --git a/apps/mobile/src/features/settings/VoiceModelSection.tsx b/apps/mobile/src/features/settings/VoiceModelSection.tsx
-index 0bee9748b19c..fad4c8eb3828 100644
+index 07d81f2a99..ee03c2c0df 100644
 --- a/apps/mobile/src/features/settings/VoiceModelSection.tsx
 +++ b/apps/mobile/src/features/settings/VoiceModelSection.tsx
-@@ -118,7 +118,7 @@ const languageNames =
-   typeof Intl.DisplayNames === "function"
-     ? new Intl.DisplayNames(undefined, { type: "language" })
-     : null;
--const languageLabel = (code: string) => languageNames?.of(code) ?? code.toUpperCase();
-+export const languageLabel = (code: string) => languageNames?.of(code) ?? code.toUpperCase();
+@@ -125,7 +125,7 @@ export function useVoiceModels(environmentId: EnvironmentId, label: string) {
+ export type VoiceModels = ReturnType<typeof useVoiceModels>;
  
- function ModelStats(props: { readonly model: EnvironmentSpeechModel; readonly language: string }) {
-   const { model, language } = props;
+ const languageNames = new Map<string, Intl.DisplayNames>();
+-function languageLabel(code: string, locale: string) {
++export function languageLabel(code: string, locale: string) {
+   if (typeof Intl.DisplayNames !== "function") return code.toUpperCase();
+   let names = languageNames.get(locale);
+   if (!names)
 diff --git a/apps/mobile/src/features/voice-input/voiceDestination.test.ts b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
-index 39ac3160f9ed..980bb22011d6 100644
+index 39ac3160f9..980bb22011 100644
 --- a/apps/mobile/src/features/voice-input/voiceDestination.test.ts
 +++ b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
 @@ -1,5 +1,6 @@
@@ -205,10 +210,10 @@ index 39ac3160f9ed..980bb22011d6 100644
 +  }
 +});
 diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
-index dd27cca67488..a6f48d6959df 100644
+index 1a1c1e9396..787420306a 100644
 --- a/apps/mobile/src/features/voice-input/voiceDestination.ts
 +++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
-@@ -26,6 +26,7 @@ import { requireOptionalNativeModule } from "expo";
+@@ -29,6 +29,7 @@ import { requireOptionalNativeModule } from "expo";
  import { fetch as expoFetch } from "expo/fetch";
  
  import { appAtomRegistry } from "../../state/atom-registry";
@@ -216,7 +221,7 @@ index dd27cca67488..a6f48d6959df 100644
  import { environmentPresentations } from "../../state/presentation";
  import { environmentSession, sessionHasScope } from "../../state/session";
  import { connectionAtomRuntime } from "../../connection/runtime";
-@@ -138,6 +139,7 @@ export function runSpeech<A, E>(
+@@ -141,6 +142,7 @@ export function runSpeech<A, E>(
  function environmentTranscriber(
    prepared: PreparedConnection,
    canSend: () => boolean,
@@ -224,7 +229,7 @@ index dd27cca67488..a6f48d6959df 100644
    cloud?: CloudDestination,
  ) {
    const provider = cloud?.provider;
-@@ -147,7 +149,7 @@ function environmentTranscriber(
+@@ -150,7 +152,7 @@ function environmentTranscriber(
      prepare: async (signal) => {
        if (provider) {
          await runSpeech(requireCloudSpeechKey(prepared, provider), signal, canSend);
@@ -233,7 +238,7 @@ index dd27cca67488..a6f48d6959df 100644
        }
        const status = await runSpeech(getEnvironmentSpeechStatus(prepared), signal, canSend);
        if (!status.supported)
-@@ -164,9 +166,9 @@ function environmentTranscriber(
+@@ -170,9 +172,9 @@ function environmentTranscriber(
                languages: status.languages,
                supportsLanguageDetection: status.supportsLanguageDetection ?? false,
              },
@@ -245,7 +250,7 @@ index dd27cca67488..a6f48d6959df 100644
      },
      decode: (uri) => {
        if (!native?.decodeRecording)
-@@ -184,14 +186,14 @@ function environmentTranscriber(
+@@ -190,14 +192,14 @@ function environmentTranscriber(
                  prepared,
                  provider,
                  pcm,
@@ -262,7 +267,7 @@ index dd27cca67488..a6f48d6959df 100644
                  canSend,
                ),
            signal,
-@@ -239,6 +241,11 @@ export const voiceSpeechBenchmarksAtom = Atom.family((id: EnvironmentId) =>
+@@ -245,6 +247,11 @@ export const voiceSpeechBenchmarksAtom = Atom.family((id: EnvironmentId) =>
    speechAtom(id, (prepared) => getEnvironmentSpeechModels(prepared, true)),
  );
  
@@ -274,7 +279,7 @@ index dd27cca67488..a6f48d6959df 100644
  // null selects on-device; a grant with no usable transcriber must never fall back.
  export const voiceRouteAtom = Atom.make((get) => {
    const grant = get(voiceGrantAtom);
-@@ -248,6 +255,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+@@ -254,6 +261,7 @@ export const voiceRouteAtom = Atom.make((get) => {
      grant.destination.environmentId,
    );
    const connection = get(connectionAtom);
@@ -282,7 +287,7 @@ index dd27cca67488..a6f48d6959df 100644
    const registry = get.registry;
    return {
      transcriber:
-@@ -255,6 +263,7 @@ export const voiceRouteAtom = Atom.make((get) => {
+@@ -261,6 +269,7 @@ export const voiceRouteAtom = Atom.make((get) => {
        environmentTranscriber(
          connection,
          () => registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection,
@@ -291,7 +296,7 @@ index dd27cca67488..a6f48d6959df 100644
        ),
    };
 diff --git a/apps/mobile/src/lib/storage.test.ts b/apps/mobile/src/lib/storage.test.ts
-index f6f928a15fd0..b8f16ec81031 100644
+index 726eea9edf..d737cfa157 100644
 --- a/apps/mobile/src/lib/storage.test.ts
 +++ b/apps/mobile/src/lib/storage.test.ts
 @@ -134,6 +134,14 @@ describe("mobile connection storage", () => {
@@ -310,10 +315,10 @@ index f6f928a15fd0..b8f16ec81031 100644
      mocks.setDatabaseFailures(true, true);
      await mocks.setItemAsync("t3code.preferences", JSON.stringify({ baseFontSize: 17 }));
 diff --git a/apps/mobile/src/persistence/mobile-preferences.ts b/apps/mobile/src/persistence/mobile-preferences.ts
-index f29fbc8c119b..f261441a4068 100644
+index 71d095b0b4..d1acdc60a9 100644
 --- a/apps/mobile/src/persistence/mobile-preferences.ts
 +++ b/apps/mobile/src/persistence/mobile-preferences.ts
-@@ -13,6 +13,7 @@ import {
+@@ -17,6 +17,7 @@ import {
    type ProviderInstanceId,
    PullRequestMergeMethod,
    type SidebarProjectGroupingMode,
@@ -321,7 +326,7 @@ index f29fbc8c119b..f261441a4068 100644
  } from "@t3tools/contracts";
  import { ToolCallVisibility } from "@t3tools/contracts/settings";
  import type { AndroidNavigationStyle } from "../lib/androidNavigationStyle";
-@@ -27,6 +28,7 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
+@@ -31,6 +32,7 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
  const PREFERENCES_KEY = "t3code.preferences";
  const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
  const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
@@ -329,7 +334,7 @@ index f29fbc8c119b..f261441a4068 100644
  
  export const PullRequestListControls = Schema.Struct({
    state: PullRequestListState,
-@@ -115,6 +117,7 @@ export interface Preferences {
+@@ -164,6 +166,7 @@ export interface Preferences {
    readonly followUpBehavior?: FollowUpBehavior;
    /** The client `language` setting: a locale code or "system". Unset means English. */
    readonly language?: string;
@@ -337,7 +342,7 @@ index f29fbc8c119b..f261441a4068 100644
    readonly microphones?: ReadonlyArray<MicrophoneEntry>;
    readonly projectGroupingEnabled?: boolean;
    readonly projectGroupingMode?: SidebarProjectGroupingMode;
-@@ -201,6 +204,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
+@@ -254,6 +257,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
      composerEnterBehavior?: ComposerEnterBehavior;
      followUpBehavior?: FollowUpBehavior;
      language?: string;
@@ -345,7 +350,7 @@ index f29fbc8c119b..f261441a4068 100644
      microphones?: ReadonlyArray<MicrophoneEntry>;
      projectGroupingEnabled?: boolean;
      projectGroupingMode?: SidebarProjectGroupingMode;
-@@ -306,6 +310,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
+@@ -369,6 +373,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
      preferences.followUpBehavior = parsed.followUpBehavior;
    }
    if (typeof parsed.language === "string") preferences.language = parsed.language;
@@ -356,7 +361,7 @@ index f29fbc8c119b..f261441a4068 100644
      preferences.microphones = parsed.microphones.flatMap((entry): MicrophoneEntry[] => {
        if (typeof entry !== "object" || entry === null || !isMicrophoneKind(entry.kind)) return [];
 diff --git a/docs/user/voice-input.md b/docs/user/voice-input.md
-index 592e110c896c..e964d762b128 100644
+index 31b73218bc..090c731394 100644
 --- a/docs/user/voice-input.md
 +++ b/docs/user/voice-input.md
 @@ -10,6 +10,9 @@ On iPhone and Android, voice input transcribes on the device by default. To opt

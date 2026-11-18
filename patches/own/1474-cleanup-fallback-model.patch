@@ -246,10 +246,10 @@ index c91aa0623d..34dce2cdc0 100644
      if (textGeneratorCannotRun && selection.instanceId === textGeneratorId) {
        return yield* new TextGenerationError({
 diff --git a/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx b/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx
-index c010748346..0c40fa5cba 100644
+index 5c918f9430..20792bd08e 100644
 --- a/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx
 +++ b/apps/web/src/components/settings/VoiceSettingsPanel.browser.test.tsx
-@@ -547,6 +547,7 @@ it.each([
+@@ -594,6 +594,7 @@ it.each([
    ["transcription-test", "voice-transcription-destination"],
    ["speech-correction-word", "speech-post-processing"],
    ["speech-post-processing-model", "speech-post-processing"],
@@ -258,10 +258,10 @@ index c010748346..0c40fa5cba 100644
    "searching for disabled %s focuses its opt-in without enabling it",
    async (target, prerequisite) => {
 diff --git a/apps/web/src/components/settings/VoiceSettingsPanel.tsx b/apps/web/src/components/settings/VoiceSettingsPanel.tsx
-index 91d73a0d07..075a18f9de 100644
+index 1b7b06bea9..fb9bd96671 100644
 --- a/apps/web/src/components/settings/VoiceSettingsPanel.tsx
 +++ b/apps/web/src/components/settings/VoiceSettingsPanel.tsx
-@@ -20,6 +20,7 @@ import {
+@@ -22,6 +22,7 @@ import {
    type EnvironmentId,
    type EnvironmentSpeechModel,
    type EnvironmentSpeechStatus,
@@ -269,7 +269,7 @@ index 91d73a0d07..075a18f9de 100644
    type ProjectId,
    ProviderDriverKind,
    type SpeechAcceleration,
-@@ -497,8 +498,11 @@ function ProjectDictionaryRow() {
+@@ -545,8 +546,11 @@ function ProjectDictionaryRow() {
    );
  }
  
@@ -280,10 +280,10 @@ index 91d73a0d07..075a18f9de 100644
 + * With `fallback`, the row sets the model that runs when the cleanup model cannot run.
 + */
 +function CleanupModelRow({ fallback = false }: { readonly fallback?: boolean }) {
+   const setting = useSearchableSetting();
+   const gt = useGT();
    const { environment, connectedEnvironments } = useSettingsScope();
-   const settings = useScopedSettings();
-   const updateSettings = useUpdateScopedSettings();
-@@ -514,20 +518,30 @@ function CleanupModelRow() {
+@@ -564,20 +568,30 @@ function CleanupModelRow() {
      projectId: null,
      selections: [
        settings.speechPostProcessingModelSelection,
@@ -319,16 +319,14 @@ index 91d73a0d07..075a18f9de 100644
      },
      textGenerationProviders,
    );
-@@ -542,18 +556,28 @@ function CleanupModelRow() {
-   const setModel = (next: ReturnType<typeof createModelSelection>) => {
-     const reason = modelDisabledReason(next.instanceId, next.model);
+@@ -594,22 +608,30 @@ function CleanupModelRow() {
      if (reason) {
--      toastManager.add({ type: "error", title: "Cleanup model not saved", description: reason });
-+      toastManager.add({
-+        type: "error",
-+        title: fallback ? "Fallback cleanup model not saved" : "Cleanup model not saved",
-+        description: reason,
-+      });
+       toastManager.add({
+         type: "error",
+-        title: gt("Cleanup model not saved"),
++        title: fallback ? gt("Fallback cleanup model not saved") : gt("Cleanup model not saved"),
+         description: reason,
+       });
        return;
      }
 -    updateSettings({ speechPostProcessingModelSelection: next });
@@ -338,23 +336,28 @@ index 91d73a0d07..075a18f9de 100644
      <SettingsRow
        serverScoped
 -      settingKeys={["speechPostProcessingModelSelection"]}
--      {...searchableSetting("speech-post-processing-model")}
--      title="Cleanup model"
--      description="Model for transcript cleanup, such as a cheaper or faster one. When disabled, use the text generation model configured for this environment."
+-      {...setting("speech-post-processing-model")}
+-      title={gt("Cleanup model")}
+-      description={gt(
+-        "Model for transcript cleanup, such as a cheaper or faster one. When disabled, use the text generation model configured for this environment.",
 +      settingKeys={[key]}
-+      {...searchableSetting(
++      {...setting(
 +        fallback ? "speech-post-processing-fallback-model" : "speech-post-processing-model",
-+      )}
-+      title={fallback ? "Fallback cleanup model" : "Cleanup model"}
+       )}
++      title={fallback ? gt("Fallback cleanup model") : gt("Cleanup model")}
 +      description={
 +        fallback
-+          ? "Model for cleanup when the cleanup model cannot run or is out of usage. When disabled, T3 picks a fallback itself."
-+          : "Model for transcript cleanup, such as a cheaper or faster one. When disabled, use the text generation model configured for this environment."
++          ? gt(
++              "Model for cleanup when the cleanup model cannot run or is out of usage. When disabled, T3 picks a fallback itself.",
++            )
++          : gt(
++              "Model for transcript cleanup, such as a cheaper or faster one. When disabled, use the text generation model configured for this environment.",
++            )
 +      }
        control={
          connectedEnvironments.length === 0 ? (
-           <span className="text-sm text-muted-foreground">Connect an environment first.</span>
-@@ -596,17 +620,19 @@ function CleanupModelRow() {
+           <span className="text-sm text-muted-foreground">
+@@ -654,17 +676,19 @@ function CleanupModelRow() {
                checked={dedicated}
                disabled={!dedicated && !hasProvider}
                onCheckedChange={(checked) =>
@@ -372,13 +375,13 @@ index 91d73a0d07..075a18f9de 100644
 +                )
 +              }
 +              aria-label={
-+                fallback ? "Use a fallback cleanup model" : "Use a separate cleanup model"
++                fallback ? gt("Use a fallback cleanup model") : gt("Use a separate cleanup model")
                }
--              aria-label="Use a separate cleanup model"
+-              aria-label={gt("Use a separate cleanup model")}
              />
            </div>
          )
-@@ -1307,6 +1333,8 @@ export function VoiceSettingsPanel() {
+@@ -1412,6 +1436,8 @@ export function VoiceSettingsPanel() {
              : undefined,
          "speech-post-processing-model":
            cleanupEnabled && settingsScope ? undefined : "speech-post-processing",
@@ -387,32 +390,32 @@ index 91d73a0d07..075a18f9de 100644
          "speech-correction-word": cleanupEnabled ? undefined : "speech-post-processing",
        }}
      >
-@@ -1693,6 +1721,7 @@ export function VoiceSettingsPanel() {
+@@ -1820,6 +1846,7 @@ export function VoiceSettingsPanel() {
            </SettingsRow>
          ) : null}
          {cleanupEnabled && settingsScope !== null ? <CleanupModelRow /> : null}
 +        {cleanupEnabled && settingsScope !== null ? <CleanupModelRow fallback /> : null}
          {cleanupEnabled ? (
            <SettingsRow
-             {...searchableSetting("speech-correction-word")}
+             {...setting("speech-correction-word")}
 diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
-index 154ad97bae..ce14077c0a 100644
+index b02f8d2f0b..a3f479a6ce 100644
 --- a/apps/web/src/components/settings/settingsSearch.ts
 +++ b/apps/web/src/components/settings/settingsSearch.ts
-@@ -587,6 +587,13 @@ export const SETTINGS_SEARCH_ITEMS = [
+@@ -619,6 +619,13 @@ export const SETTINGS_SEARCH_ITEMS = [
      scope: "environment",
-     searchTerms: ["speech voice transcript cleanup provider model post-processing"],
+     searchTerms: [msg("speech voice transcript cleanup provider model post-processing")],
    },
 +  {
 +    id: "speech-post-processing-fallback-model",
-+    title: "Fallback cleanup model",
++    title: msg("Fallback cleanup model"),
 +    to: "/settings/voice",
 +    scope: "environment",
-+    searchTerms: ["speech voice transcript cleanup fallback backup model usage limit credits"],
++    searchTerms: [msg("speech voice transcript cleanup fallback backup model usage limit credits")],
 +  },
    {
      id: "speech-correction-word",
-     title: "Correction cue",
+     title: msg("Correction cue"),
 diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
 index 678f58294c..466e74aa73 100644
 --- a/packages/contracts/src/settings.ts
