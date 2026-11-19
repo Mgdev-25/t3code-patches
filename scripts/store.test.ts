@@ -4,7 +4,13 @@ import assert from "node:assert/strict";
 
 import {
   buildReport,
+  checkAppUpdateYml,
+  checkDesktopManifest,
   compareNightly,
+  desktopState,
+  lastDesktopRelease,
+  parseUpdateManifest,
+  releaseNotes,
   partsOf,
   patchPaths,
   refusalOf,
@@ -134,13 +140,87 @@ test("prune keeps the newest release and the last days", () => {
 test("the report asks for a repair on a skipped patch, a failed build or a closed PR", () => {
   const plan = { needed: true, tag: "v0.1.10-nightly.20261115.4723", version: "0.1.10-nightly.20261115.4723", latest: true };
   const clean: ApplyResult = { applied: [{ id: "pr-1", parts: ["server"] }], skipped: [], server: true, mobile: false };
-  const base = { plan, apply: clean, notices: [], server: "built", android: "not-needed" } as const;
+  const base = { plan, apply: clean, notices: [], server: "built", android: "not-needed", desktop: "built" } as const;
   assert.equal(buildReport(base).needsRepair, false);
   assert.equal(buildReport({ ...base, notices: [{ kind: "new-head", pr: 1, head: SHA }] }).needsRepair, false);
   assert.equal(buildReport({ ...base, notices: [{ kind: "closed", pr: 1 }] }).needsRepair, true);
   assert.equal(buildReport({ ...base, server: "failed" }).needsRepair, true);
+  assert.equal(buildReport({ ...base, desktop: "failed" }).needsRepair, true);
+  assert.equal(buildReport({ ...base, desktop: "not-needed" }).needsRepair, false);
   assert.equal(
     buildReport({ ...base, apply: { ...clean, skipped: [{ id: "x", reason: "does not apply" }] } }).needsRepair,
     true,
   );
+});
+
+test("the desktop is built only after a server build, else it keeps the last store files", () => {
+  assert.equal(desktopState("success", "success"), "built");
+  assert.equal(desktopState("success", "failure"), "failed");
+  assert.equal(desktopState("success", "cancelled"), "failed");
+  // A failed server build skips the desktop job: the desktop also failed.
+  assert.equal(desktopState("failure", "skipped"), "failed");
+  // No server patch: nothing to build, and no repair.
+  assert.equal(desktopState("skipped", "skipped"), "not-needed");
+});
+
+test("a release that builds no desktop app keeps the files of the newest store release that has them", () => {
+  const both = ["T3-Code-Nightly-x86_64.AppImage", "nightly-linux.yml", "SHA256SUMS"];
+  const releases = [
+    { tagName: "v0.1.11-nightly.20261119.4918", assets: both },
+    { tagName: "v0.1.11-nightly.20261118.4903", assets: ["nightly-linux.yml"] },
+    { tagName: "v0.1.11-nightly.20261118.4890", assets: both },
+    { tagName: "v0.1.11-nightly.20261117.4864", assets: both },
+  ];
+  // The release of the run itself never counts, also when a replace run publishes it again.
+  assert.equal(lastDesktopRelease(releases, "v0.1.11-nightly.20261119.4918"), "v0.1.11-nightly.20261118.4890");
+  assert.equal(lastDesktopRelease(releases, "v0.1.11-nightly.20261120.5000"), "v0.1.11-nightly.20261119.4918");
+  assert.equal(lastDesktopRelease(releases.slice(1, 2), "v0.1.11-nightly.20261120.5000"), undefined);
+});
+
+// Upstream's nightly-linux.yml of v0.1.11-nightly.20261119.4918.
+const MANIFEST = `version: 0.1.11-nightly.20261119.4918
+files:
+  - url: T3-Code-Nightly-x86_64.AppImage
+    sha512: EjCW+lCFUMyf/HZ2xxWJhg+lfaCgnic2v7c1nUyn20nFBdFtfuRfV4v2qBTW9/WwEDGIEE09frkcfi6XcPYthg==
+    size: 256033014
+    blockMapSize: 268026
+  - url: T3-Code-0.1.11-nightly.20261119.4918-amd64.deb
+    sha512: 4jAbGfsQjGG3X3IIWFDH6SVXAojAjHmgNMsZHq3UH0a3lzxH77LXtlEuPsDfXgffp0oD/J/J5ECEsOnUNiKOlg==
+    size: 212362492
+path: T3-Code-Nightly-x86_64.AppImage
+sha512: EjCW+lCFUMyf/HZ2xxWJhg+lfaCgnic2v7c1nUyn20nFBdFtfuRfV4v2qBTW9/WwEDGIEE09frkcfi6XcPYthg==
+releaseDate: '2026-11-19T05:19:50.032Z'
+`;
+
+test("the desktop manifest names the version, and the sha512 and size of the AppImage", () => {
+  const manifest = parseUpdateManifest(MANIFEST);
+  assert.equal(manifest.version, "0.1.11-nightly.20261119.4918");
+  assert.equal(manifest.files.length, 2);
+  const appImage = {
+    sha512: "EjCW+lCFUMyf/HZ2xxWJhg+lfaCgnic2v7c1nUyn20nFBdFtfuRfV4v2qBTW9/WwEDGIEE09frkcfi6XcPYthg==",
+    size: 256033014,
+  };
+  assert.deepEqual(checkDesktopManifest(manifest, "0.1.11-nightly.20261119.4918", appImage), []);
+  assert.match(checkDesktopManifest(manifest, "0.1.11-nightly.20261120.5000", appImage).join(), /version/);
+  assert.match(checkDesktopManifest(manifest, manifest.version, { ...appImage, size: 1 }).join(), /size/);
+  assert.equal(checkDesktopManifest(manifest, manifest.version, { ...appImage, sha512: "x" }).length, 2);
+});
+
+test("the AppImage of the store updates from the store repo on the nightly channel", () => {
+  const yml = "owner: Mgdev-25\nrepo: t3code-patches\nprovider: github\nreleaseType: prerelease\nchannel: nightly\nupdaterCacheDirName: t3code-updater\n";
+  assert.deepEqual(checkAppUpdateYml(yml, "Mgdev-25/t3code-patches"), []);
+  assert.match(checkAppUpdateYml(yml.replace("Mgdev-25", "pingdotgg").replace("t3code-patches", "t3code"), "Mgdev-25/t3code-patches").join(), /feed/);
+  assert.match(checkAppUpdateYml(yml.replace("channel: nightly", "channel: latest"), "Mgdev-25/t3code-patches").join(), /channel/);
+});
+
+test("the notes name the desktop state and the release whose files it keeps", () => {
+  const plan = { needed: true, tag: "v0.1.11-nightly.20261119.4918", version: "0.1.11-nightly.20261119.4918", latest: true };
+  const apply: ApplyResult = { applied: [], skipped: [], server: true, mobile: false };
+  const report = buildReport({
+    plan, apply, notices: [], server: "built", android: "not-needed", desktop: "failed", desktopFrom: "v0.1.11-nightly.20261118.4903",
+  });
+  assert.equal(report.desktopFrom, "v0.1.11-nightly.20261118.4903");
+  assert.match(releaseNotes(report), /Desktop AppImage: failed, files of v0\.1\.11-nightly\.20261118\.4903\./);
+  const built = buildReport({ plan, apply, notices: [], server: "built", android: "not-needed", desktop: "built", desktopFrom: "x" });
+  assert.equal(built.desktopFrom, null);
 });

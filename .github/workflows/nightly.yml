@@ -1,7 +1,10 @@
 # Publishes one store release v<version> for each upstream T3 Code nightly.
 # The release holds the Linux x64 server archive and SHA256SUMS: a build with the
 # server patches, or a byte-for-byte copy of upstream's archive when no server
-# patch applies. It holds the Android APK when a phone patch applies.
+# patch applies. It holds the Linux x64 desktop AppImage and its update manifest
+# nightly-linux.yml, built from the same tree as the server archive. A release
+# that builds no AppImage keeps the desktop files of the last store release.
+# It holds the Android APK when a phone patch applies.
 # A patch that does not apply is left out and named in PATCHES.json.
 name: Nightly
 
@@ -191,6 +194,18 @@ jobs:
       - name: Build resource monitor
         run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
 
+      # The desktop job packages this bundle and resource monitor, as upstream's desktop jobs take
+      # the js-bundle of release.yml. The upload comes before the branding, as upstream's does.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+            native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Apply web client branding
         run: node scripts/apply-web-brand-assets.ts nightly apps/server/dist/client
 
@@ -229,6 +244,109 @@ jobs:
         with:
           name: server
           path: release-cli/t3-${{ env.VERSION }}-linux-x64.tar.gz
+          compression-level: 0
+          retention-days: 3
+
+  # Upstream's Linux x64 AppImage steps from release-desktop.yml, on the bundle of the server job.
+  # The AppImage keeps GITHUB_REPOSITORY, this store, as its update feed, so an installed store
+  # build updates from the store.
+  desktop:
+    needs: [plan, server]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      T3CODE_TELEMETRY_CHANNEL: dev
+    steps:
+      - name: Check out upstream
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/$UPSTREAM.git"
+          git fetch -q --no-tags --depth=1 origin "refs/tags/${{ needs.plan.outputs.tag }}"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout -q --detach FETCH_HEAD
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.store_sha }}
+          path: store
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Apply the patches
+        working-directory: store
+        env:
+          SKIP: ${{ inputs.skip }}
+        run: |
+          node scripts/store.ts apply --src "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/apply-desktop.json" --skip "$SKIP"
+          diff <(jq -S .applied "$RUNNER_TEMP/plan/apply.json") <(jq -S .applied "$RUNNER_TEMP/apply-desktop.json")
+
+      - name: Load the public T3 Connect values
+        run: |
+          for name in CLERK_PUBLISHABLE_KEY CLERK_JWT_TEMPLATE CLERK_CLI_OAUTH_CLIENT_ID RELAY_URL; do
+            value="$(sed -n "s|^T3CODE_$name=||p" .env.example)"
+            test -n "$value" || { echo "::error::.env.example has no T3CODE_$name"; exit 1; }
+            echo "T3CODE_$name=$value" >> "$GITHUB_ENV"
+          done
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Align package versions to the release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-bundle
+          path: .
+
+      - name: Restore the resource monitor mode
+        run: chmod +x native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor
+
+      - name: Install Linux desktop build libraries
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsecret-1-dev pkg-config libgtk-3-0t64 libnss3 libasound2t64 libgbm1 imagemagick xvfb
+
+      # Rust builds the 2 capture helpers here. The resource monitor comes from the server job.
+      - name: Build the AppImage
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: true
+        run: |
+          vp run dist:desktop:artifact --platform linux --target AppImage --arch x64 \
+            --build-version "$VERSION" --skip-build --verbose
+          ls -l release
+
+      # A build can package fine and still not open. This launches the app from the AppImage.
+      - name: Launch check
+        run: |
+          chmod +x "release/T3-Code-Nightly-x86_64.AppImage"
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/release/T3-Code-Nightly-x86_64.AppImage" --appimage-extract >/dev/null)
+          xvfb-run -a node scripts/smoke-desktop-app.ts --artifacts-dir "$RUNNER_TEMP/desktop-launch-check" \
+            --executable "$RUNNER_TEMP/squashfs-root/t3code"
+
+      - name: Check the manifest and the update feed
+        working-directory: store
+        run: |
+          node scripts/store.ts desktop-check --dir "$GITHUB_WORKSPACE/release" --version "$VERSION" \
+            --app-update "$RUNNER_TEMP/squashfs-root/resources/app-update.yml"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop
+          path: |
+            release/T3-Code-Nightly-x86_64.AppImage
+            release/nightly-linux.yml
+          if-no-files-found: error
           compression-level: 0
           retention-days: 3
 
@@ -368,7 +486,7 @@ jobs:
           echo "$out" | grep -E 'certificate (DN|SHA-256)' || { echo "$out"; exit 1; }
 
   publish:
-    needs: [plan, server, android]
+    needs: [plan, server, android, desktop]
     if: ${{ !cancelled() && needs.plan.outputs.needed == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -404,13 +522,36 @@ jobs:
             gh release download "$TAG" --repo "$UPSTREAM" --dir out --pattern "$archive" --pattern SHA256SUMS
           fi
 
+      # With no AppImage of its own, the release keeps the desktop files of the last store release,
+      # so the desktop updater never sees a new version that is not a store build.
+      - name: Collect the desktop app
+        id: desktop
+        env:
+          SERVER_RESULT: ${{ needs.server.result }}
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
+        run: |
+          state="$(node scripts/store.ts desktop-state --server "$SERVER_RESULT" --desktop "$DESKTOP_RESULT")"
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          if [ "$state" = built ]; then
+            cp "$RUNNER_TEMP/in/desktop/T3-Code-Nightly-x86_64.AppImage" "$RUNNER_TEMP/in/desktop/nightly-linux.yml" out/
+            exit 0
+          fi
+          from="$(node scripts/store.ts desktop-source --tag "$TAG" | jq -r '.from // empty')"
+          if [ -z "$from" ]; then
+            echo "::warning::no store release has desktop files to keep"
+            exit 0
+          fi
+          gh release download "$from" --dir out --pattern T3-Code-Nightly-x86_64.AppImage --pattern nightly-linux.yml
+          echo "from=$from" >> "$GITHUB_OUTPUT"
+
       - name: Write the report
         env:
           ANDROID_RESULT: ${{ needs.android.result }}
         run: |
           case "$ANDROID_RESULT" in success) android=built ;; skipped) android=not-needed ;; *) android=failed ;; esac
           node scripts/store.ts report --plan "$RUNNER_TEMP/in/plan/plan.json" --apply "$RUNNER_TEMP/in/plan/apply.json" \
-            --notices "$RUNNER_TEMP/in/plan/notices.json" --server "${{ steps.server.outputs.state }}" --android "$android" --out out
+            --notices "$RUNNER_TEMP/in/plan/notices.json" --server "${{ steps.server.outputs.state }}" --android "$android" \
+            --desktop "${{ steps.desktop.outputs.state }}" --desktop-from "${{ steps.desktop.outputs.from }}" --out out
           if [ "${{ steps.server.outputs.state }}" = built ]; then
             cp "$RUNNER_TEMP/in/server/t3-$VERSION-linux-x64.tar.gz" out/
             node scripts/store.ts marker --archive "out/t3-$VERSION-linux-x64.tar.gz" --report out/PATCHES.json
@@ -420,6 +561,9 @@ jobs:
             cp "$RUNNER_TEMP/in/android/t3code-preview-$VERSION.apk" out/
             (cd out && sha256sum "t3code-preview-$VERSION.apk" >> SHA256SUMS)
           fi
+          if [ -f out/T3-Code-Nightly-x86_64.AppImage ]; then
+            (cd out && sha256sum T3-Code-Nightly-x86_64.AppImage >> SHA256SUMS)
+          fi
           (cd out && sha256sum -c SHA256SUMS --ignore-missing)
           ls -l out
 
@@ -428,16 +572,19 @@ jobs:
           REPLACE: ${{ inputs.replace }}
           SERVER_STATE: ${{ steps.server.outputs.state }}
           ANDROID_RESULT: ${{ needs.android.result }}
+          DESKTOP_STATE: ${{ steps.desktop.outputs.state }}
         run: |
           latest="$(jq -r .latest "$RUNNER_TEMP/in/plan/plan.json")"
           if [ "$REPLACE" = true ] && gh release view "$TAG" >/dev/null 2>&1; then
             # A failed build never replaces a release that works.
-            if [ "$SERVER_STATE" = failed ] || { [ "$ANDROID_RESULT" != success ] && [ "$ANDROID_RESULT" != skipped ]; }; then
-              echo "::error::server $SERVER_STATE, android $ANDROID_RESULT: the existing $TAG release stays"
+            if [ "$SERVER_STATE" = failed ] || [ "$DESKTOP_STATE" = failed ] || { [ "$ANDROID_RESULT" != success ] && [ "$ANDROID_RESULT" != skipped ]; }; then
+              echo "::error::server $SERVER_STATE, desktop $DESKTOP_STATE, android $ANDROID_RESULT: the existing $TAG release stays"
               exit 1
             fi
             gh release delete "$TAG" --yes --cleanup-tag
           fi
+          # With files, gh creates a draft, uploads every file, then publishes it. So no updater sees
+          # nightly-linux.yml before the AppImage is there.
           gh release create "$TAG" --title "$VERSION" --notes-file out/notes.md --latest="$latest" --target main \
             $(find out -maxdepth 1 -type f ! -name notes.md | sort)
 
