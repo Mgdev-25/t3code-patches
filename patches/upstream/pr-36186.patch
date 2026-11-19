@@ -1,5 +1,5 @@
 diff --git a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
-index dcefd506c4..6cf5ae29fe 100644
+index 6e18e2146d..a409813fd1 100644
 --- a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
 +++ b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
 @@ -1,9 +1,10 @@
@@ -14,15 +14,15 @@ index dcefd506c4..6cf5ae29fe 100644
  import { Linking, Platform, useWindowDimensions, View } from "react-native";
  import Reanimated, { ReduceMotion, useAnimatedStyle, withTiming } from "react-native-reanimated";
  import { useSafeAreaInsets } from "react-native-safe-area-context";
-@@ -22,6 +23,7 @@ import {
- import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
+@@ -23,6 +24,7 @@ import { mobilePreferencesAtom, saveMobilePreferences } from "../../state/prefer
+ import { useAtomCommand } from "../../state/use-atom-command";
  import { ListRowLayout } from "../../components/ui/ListRowLayout";
  import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
 +import { Sheet } from "../../components/ui/Sheet";
  import * as Dialog from "../../components/ui/Dialog";
  import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
  import {
-@@ -29,9 +31,10 @@ import {
+@@ -30,9 +32,10 @@ import {
    cloudVoiceConnectionAtom,
    voiceConnectionAtom,
    voiceGrantAtom,
@@ -34,14 +34,14 @@ index dcefd506c4..6cf5ae29fe 100644
  import { CloudVoiceChoice } from "./CloudVoiceSection";
  import type { VoiceGrant } from "../voice-input/voiceGrantStorage";
  import type { EnvironmentId } from "@t3tools/contracts";
-@@ -218,6 +221,69 @@ function EnvironmentMethodSection({
+@@ -219,6 +222,69 @@ function EnvironmentMethodSection({
    );
  }
  
 +/** Offers the languages the chosen destination can transcribe, as web's Voice settings do. */
 +function TranscriptionLanguageSection({ grant }: { grant: VoiceGrant }) {
 +  const preferencesResult = useAtomValue(mobilePreferencesAtom);
-+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
++  const savePreferences = useAtomCommand(saveMobilePreferences);
 +  const [open, setOpen] = useState(false);
 +  const locale = useLocale();
 +  const status = AsyncResult.getOrElse(
@@ -89,7 +89,7 @@ index dcefd506c4..6cf5ae29fe 100644
 +                label={code === "auto" ? "Auto-detect" : languageLabel(code, locale)}
 +                selected={preference === code}
 +                onPress={() => {
-+                  savePreferences({ speechLanguage: code });
++                  void savePreferences({ speechLanguage: code });
 +                  setOpen(false);
 +                }}
 +              />
@@ -104,7 +104,7 @@ index dcefd506c4..6cf5ae29fe 100644
  export function SettingsVoiceRouteScreen() {
    const gt = useGT();
    const m = useMessages();
-@@ -337,6 +403,9 @@ export function SettingsVoiceRouteScreen() {
+@@ -340,6 +406,9 @@ export function SettingsVoiceRouteScreen() {
              }
            />
          ) : null}
@@ -115,10 +115,10 @@ index dcefd506c4..6cf5ae29fe 100644
            <Text className="px-2 text-sm text-foreground-muted">{m(UNAVAILABLE_EXPLANATION)}</Text>
          ) : null}
 diff --git a/apps/mobile/src/features/settings/VoiceModelSection.tsx b/apps/mobile/src/features/settings/VoiceModelSection.tsx
-index 07d81f2a99..ee03c2c0df 100644
+index 7a745bb970..13634cfab5 100644
 --- a/apps/mobile/src/features/settings/VoiceModelSection.tsx
 +++ b/apps/mobile/src/features/settings/VoiceModelSection.tsx
-@@ -125,7 +125,7 @@ export function useVoiceModels(environmentId: EnvironmentId, label: string) {
+@@ -121,7 +121,7 @@ export function useVoiceModels(environmentId: EnvironmentId, label: string) {
  export type VoiceModels = ReturnType<typeof useVoiceModels>;
  
  const languageNames = new Map<string, Intl.DisplayNames>();
