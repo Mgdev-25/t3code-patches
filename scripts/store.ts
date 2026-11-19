@@ -5,13 +5,18 @@
 //   sync    --tag <tag> --notices <file>             drop merged PRs from patches.json
 //   apply   --src <dir> --out <file> [--skip a,b]    apply the list to an upstream checkout
 //   marker  --archive <file> --report <file>         put PATCHES.json in a built server archive
-//   report  --plan <f> --apply <f> --notices <f> --server <state> --android <state> --out <dir>
+//   desktop-state  --server <result> --desktop <result>  the desktop state from the 2 job results
+//   desktop-source --tag <tag>                       the store release whose desktop files to keep
+//   desktop-check  --dir <dir> --version <v> --app-update <file>  check a built desktop app
+//   report  --plan <f> --apply <f> --notices <f> --server <state> --android <state>
+//           --desktop <state> [--desktop-from <tag>] --out <dir>
 //   prune   --keep-days <n>                          delete store releases older than n days
 //
 // Each command prints one JSON line. The pure functions below have tests in store.test.ts.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -234,11 +239,119 @@ export function releasesToPrune(
 
 export type BuildState = "built" | "copied" | "failed" | "not-needed";
 
+/** A GitHub Actions job result, as `needs.<job>.result` gives it. */
+export type JobResult = "success" | "failure" | "cancelled" | "skipped";
+
+/** The Linux x64 desktop files of a release. electron-updater reads the manifest, then the AppImage. */
+export const DESKTOP_APPIMAGE = "T3-Code-Nightly-x86_64.AppImage";
+export const DESKTOP_MANIFEST = "nightly-linux.yml";
+export const DESKTOP_FILES: ReadonlyArray<string> = [DESKTOP_APPIMAGE, DESKTOP_MANIFEST];
+
+/**
+ * The desktop state of a release. The desktop job packages the bundle of the server job, so it
+ * runs only after a server build. With no server patch there is nothing to build: the release
+ * keeps the desktop files of the last store release, as it does after a failed build.
+ */
+export function desktopState(server: JobResult, desktop: JobResult): BuildState {
+  if (server === "skipped") return "not-needed";
+  return server === "success" && desktop === "success" ? "built" : "failed";
+}
+
+export interface ReleaseAssets {
+  readonly tagName: string;
+  readonly assets: ReadonlyArray<string>;
+}
+
+/** The newest store nightly other than `tag` that holds both desktop files, or undefined. */
+export function lastDesktopRelease(releases: ReadonlyArray<ReleaseAssets>, tag: string): string | undefined {
+  return releases
+    .filter((release) => release.tagName !== tag && NIGHTLY_TAG.test(release.tagName))
+    .filter((release) => DESKTOP_FILES.every((file) => release.assets.includes(file)))
+    .sort((a, b) => compareNightly(b.tagName, a.tagName))[0]?.tagName;
+}
+
+export interface ManifestFile {
+  readonly url: string;
+  readonly sha512: string;
+  readonly size: number;
+}
+
+export interface UpdateManifest {
+  readonly version: string;
+  readonly path: string;
+  readonly sha512: string;
+  readonly files: ReadonlyArray<ManifestFile>;
+}
+
+/**
+ * Reads the few fields of an electron-builder update manifest that the store checks. The file is
+ * flat YAML: top keys, and a `files` list of `- url:` entries with indented keys.
+ */
+export function parseUpdateManifest(text: string): UpdateManifest {
+  const top: Record<string, string> = {};
+  const files: Array<Record<string, string>> = [];
+  for (const line of text.split(/\r?\n/)) {
+    const entry = /^\s+-\s+(\w+):\s*(.*)$/.exec(line);
+    const field = /^\s+(\w+):\s*(.*)$/.exec(line);
+    const key = /^(\w+):\s*(.*)$/.exec(line);
+    if (entry !== null) files.push({ [entry[1]!]: unquote(entry[2]!) });
+    else if (field !== null && files.length > 0) files[files.length - 1]![field[1]!] = unquote(field[2]!);
+    else if (key !== null) top[key[1]!] = unquote(key[2]!);
+  }
+  return {
+    version: top.version ?? "",
+    path: top.path ?? "",
+    sha512: top.sha512 ?? "",
+    files: files.map((file) => ({ url: file.url ?? "", sha512: file.sha512 ?? "", size: Number(file.size) })),
+  };
+}
+
+const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, "$2");
+
+/** What is wrong with a built desktop manifest for the AppImage `appImage` of `version`. */
+export function checkDesktopManifest(
+  manifest: UpdateManifest,
+  version: string,
+  appImage: { readonly sha512: string; readonly size: number },
+): ReadonlyArray<string> {
+  const errors: string[] = [];
+  if (manifest.version !== version) errors.push(`manifest version ${manifest.version}, expected ${version}`);
+  if (manifest.path !== DESKTOP_APPIMAGE) errors.push(`manifest path ${manifest.path}, expected ${DESKTOP_APPIMAGE}`);
+  if (manifest.sha512 !== appImage.sha512) errors.push("manifest sha512 does not match the AppImage");
+  const file = manifest.files.find((item) => item.url === DESKTOP_APPIMAGE);
+  if (file === undefined) errors.push(`manifest lists no ${DESKTOP_APPIMAGE}`);
+  else {
+    if (file.sha512 !== appImage.sha512) errors.push("files entry sha512 does not match the AppImage");
+    if (file.size !== appImage.size) errors.push(`files entry size ${file.size}, the AppImage has ${appImage.size}`);
+  }
+  return errors;
+}
+
+/**
+ * What is wrong with the app-update.yml inside the AppImage. It must name the store repo, so an
+ * installed store build keeps updating from the store, and the nightly channel.
+ */
+export function checkAppUpdateYml(text: string, repo: string): ReadonlyArray<string> {
+  const fields = new Map<string, string>();
+  for (const match of text.matchAll(/^(\w+):\s*(.*)$/gm)) fields.set(match[1]!, unquote(match[2]!));
+  const [owner, name] = repo.split("/");
+  const errors: string[] = [];
+  if (fields.get("provider") !== "github") errors.push(`provider ${fields.get("provider")}, expected github`);
+  if (fields.get("owner") !== owner || fields.get("repo") !== name) {
+    errors.push(`feed ${fields.get("owner")}/${fields.get("repo")}, expected ${repo}`);
+  }
+  if (fields.get("channel") !== "nightly") errors.push(`channel ${fields.get("channel")}, expected nightly`);
+  return errors;
+}
+
 export interface Report {
   readonly version: string;
   readonly upstreamTag: string;
   readonly server: BuildState;
   readonly android: BuildState;
+  readonly desktop: BuildState;
+  /** The store release whose desktop files this release keeps, when it did not build its own. */
+  readonly desktopFrom: string | null;
   readonly applied: ReadonlyArray<Applied>;
   readonly skipped: ReadonlyArray<Skipped>;
   readonly notices: ReadonlyArray<Notice>;
@@ -252,12 +365,16 @@ export function buildReport(input: {
   readonly notices: ReadonlyArray<Notice>;
   readonly server: BuildState;
   readonly android: BuildState;
+  readonly desktop: BuildState;
+  readonly desktopFrom?: string | undefined;
 }): Report {
   return {
     version: input.plan.version,
     upstreamTag: input.plan.tag,
     server: input.server,
     android: input.android,
+    desktop: input.desktop,
+    desktopFrom: input.desktop === "built" ? null : (input.desktopFrom ?? null),
     applied: input.apply.applied,
     skipped: input.apply.skipped,
     notices: input.notices,
@@ -265,6 +382,7 @@ export function buildReport(input: {
       input.apply.skipped.length > 0 ||
       input.server === "failed" ||
       input.android === "failed" ||
+      input.desktop === "failed" ||
       input.notices.some((notice) => notice.kind === "closed"),
   };
 }
@@ -274,7 +392,9 @@ export function releaseNotes(report: Report): string {
   return [
     `Upstream ${report.upstreamTag} plus the patches below.`,
     "",
-    `Server archive: ${report.server}. Android APK: ${report.android}.`,
+    `Server archive: ${report.server}. Android APK: ${report.android}. Desktop AppImage: ${report.desktop}${
+      report.desktopFrom === null ? "" : `, files of ${report.desktopFrom}`
+    }.`,
     "",
     "Applied:",
     ...(report.applied.length > 0 ? report.applied.map(line) : ["- none"]),
@@ -332,6 +452,25 @@ function listReleases(repo: string): ReadonlyArray<Release> {
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as Release)
     .filter((release) => release.publishedAt !== null);
+}
+
+function listReleaseAssets(repo: string): ReadonlyArray<ReleaseAssets> {
+  const out = run("gh", [
+    "api",
+    "--paginate",
+    `repos/${repo}/releases?per_page=100`,
+    "--jq",
+    ".[] | select(.draft | not) | {tagName: .tag_name, assets: [.assets[].name]}",
+  ]);
+  return out
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as ReleaseAssets);
+}
+
+/** The sha512 in base64 and the size of a file, as electron-builder writes them. */
+function fileDigest(file: string): { readonly sha512: string; readonly size: number } {
+  return { sha512: createHash("sha512").update(readFileSync(file)).digest("base64"), size: statSync(file).size };
 }
 
 function upstreamNightlies(): ReadonlyArray<Release> {
@@ -476,6 +615,29 @@ function main(argv: ReadonlyArray<string>) {
       console.log(JSON.stringify({ ok: true }));
       return;
     }
+    case "desktop-state": {
+      console.log(desktopState(required(args, "--server") as JobResult, required(args, "--desktop") as JobResult));
+      return;
+    }
+    case "desktop-source": {
+      const from = lastDesktopRelease(listReleaseAssets(storeRepo()), required(args, "--tag")) ?? null;
+      console.log(JSON.stringify({ from }));
+      return;
+    }
+    case "desktop-check": {
+      const dir = required(args, "--dir");
+      const errors = [
+        ...checkDesktopManifest(
+          parseUpdateManifest(readFileSync(join(dir, DESKTOP_MANIFEST), "utf8")),
+          required(args, "--version"),
+          fileDigest(join(dir, DESKTOP_APPIMAGE)),
+        ),
+        ...checkAppUpdateYml(readFileSync(required(args, "--app-update"), "utf8"), storeRepo()),
+      ];
+      console.log(JSON.stringify({ ok: errors.length === 0, errors }));
+      if (errors.length > 0) process.exitCode = 1;
+      return;
+    }
     case "report": {
       const report = buildReport({
         plan: readJson<Plan>(required(args, "--plan")),
@@ -483,6 +645,8 @@ function main(argv: ReadonlyArray<string>) {
         notices: readJson<ReadonlyArray<Notice>>(required(args, "--notices")),
         server: required(args, "--server") as BuildState,
         android: required(args, "--android") as BuildState,
+        desktop: required(args, "--desktop") as BuildState,
+        desktopFrom: argValue(args, "--desktop-from") || undefined,
       });
       const out = required(args, "--out");
       writeJson(join(out, "PATCHES.json"), report);

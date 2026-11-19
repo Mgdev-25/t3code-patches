@@ -1,7 +1,7 @@
 # T3 Code patches
 
-Morgan's T3 server and his second T3 Android app run each upstream T3 Code
-nightly plus a short list of chosen fixes. Shell issue
+Morgan's T3 server, his T3 desktop app on Linux and his second T3 Android app
+run each upstream T3 Code nightly plus a short list of chosen fixes. Shell issue
 [1411](https://github.com/Mgdev-25/shell/issues/1411) holds the plan and the
 decisions.
 
@@ -24,6 +24,15 @@ decisions.
   - the Linux x64 server archive and `SHA256SUMS`. When a server patch applies,
     it is a build with `PATCHES.json` in the top folder of the archive. Else it
     is a byte-for-byte copy of upstream's archive and checksum file.
+  - `T3-Code-Nightly-x86_64.AppImage` and its update manifest
+    `nightly-linux.yml`, the Linux x64 desktop app built from the same patched
+    tree as the server archive. Its update feed is this repo, so an installed
+    store AppImage updates from the store. A release that builds no AppImage,
+    because no server patch applies or the build failed, keeps the 2 files of
+    the newest store release that has them. So the desktop never sees a new
+    version that is not a store build. A failed desktop build sets
+    `needsRepair`. [Shell issue 1474](https://github.com/Mgdev-25/shell/issues/1474)
+    holds the decisions.
   - `t3code-preview-<version>.apk` when a phone patch applies. Package
     `com.t3tools.t3code.preview`, signed with the store key, with upstream's
     over-the-air updates off.
@@ -41,6 +50,9 @@ decisions.
   `T3CODE_RELEASE_BASE_URL=https://github.com/Mgdev-25/t3code-patches/releases/download`.
   Update from the T3 app as usual. T3 checks the SHA-256, runs its preflight and
   goes back to the old version when the new one fails to start.
+- Desktop: install a store AppImage one time in place of the upstream one.
+  After that, the Update button of the desktop app installs each new store
+  build. To go back to plain upstream, install an upstream AppImage again.
 - Phone: Obtainium watches this repo's releases and offers each new APK.
 
 ## Limits

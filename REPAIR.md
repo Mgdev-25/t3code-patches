@@ -14,7 +14,10 @@ first. Then act on each fault:
   this repo with the new patch file, then run the workflow with the tag and
   `replace` after the merge.
 - A build failed. Read the failed step. Repair the workflow when upstream
-  changed a build step. Never publish a release by hand.
+  changed a build step. Never publish a release by hand. After a failed
+  desktop build, the release keeps the desktop files of the release that
+  `desktopFrom` in `PATCHES.json` names, so the desktop app stays on that
+  build until a repaired run.
 - A PR was closed unmerged. Ask Morgan: keep it as an own patch, or drop it.
 - No release for the newest nightly. The gate started the workflow 60 minutes
   ago, or the reason gives its start error. Read the run of that start and the
