@@ -1,8 +1,8 @@
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 9ed0f19d8a..0d62a664d0 100644
+index 454e2fbb71..1087b68cb9 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-@@ -85,6 +85,8 @@ export function QuestionAttachments(props: {
+@@ -83,6 +83,8 @@ export function QuestionAttachments(props: {
    const inputRef = useRef<TextInputInstance>(null);
    const [input, setInput] = useState(() => ({ text: props.value, version: 0 }));
    const nativeText = useRef(props.value);
@@ -11,7 +11,7 @@ index 9ed0f19d8a..0d62a664d0 100644
    const [selection, setSelection] = useState<ComposerEditorSelection>(() => ({
      start: props.value.length,
      end: props.value.length,
-@@ -111,6 +113,7 @@ export function QuestionAttachments(props: {
+@@ -109,6 +111,7 @@ export function QuestionAttachments(props: {
          focusedRef.current = false;
          onInputFocusChange?.(false);
        }
@@ -19,7 +19,7 @@ index 9ed0f19d8a..0d62a664d0 100644
        nativeText.current = text;
        setInput((current) => ({ text, version: current.version + 1 }));
        props.onChangeText(text);
-@@ -127,6 +130,13 @@ export function QuestionAttachments(props: {
+@@ -125,6 +128,13 @@ export function QuestionAttachments(props: {
      inputRef.current?.clear();
      setSelection({ start: 0, end: 0 });
    }, [props.value]);
@@ -33,7 +33,7 @@ index 9ed0f19d8a..0d62a664d0 100644
    const append = (
      key: string,
      attachments: Parameters<typeof appendComposerDraftAttachments>[1],
-@@ -269,6 +279,7 @@ export function QuestionAttachments(props: {
+@@ -252,6 +262,7 @@ export function QuestionAttachments(props: {
                submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
                editable={!props.disabled && !voice.freezesEditor}
                onChangeText={(text) => {
@@ -42,10 +42,10 @@ index 9ed0f19d8a..0d62a664d0 100644
                  props.onChangeText(text);
                }}
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-index 12b9a555e6..b4da8aabb1 100644
+index 5df500db94..eea8a4579d 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-@@ -113,7 +113,7 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
+@@ -117,7 +117,7 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
  
  import { QuestionAttachments } from "./QuestionAttachments";
  
@@ -54,7 +54,7 @@ index 12b9a555e6..b4da8aabb1 100644
    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
    harness.voice = null;
    harness.started = 0;
-@@ -123,30 +123,34 @@ function setup() {
+@@ -127,30 +127,34 @@ function setup() {
      question: "Type your answer",
      options: [],
      multiSelect: false,
@@ -102,7 +102,7 @@ index 12b9a555e6..b4da8aabb1 100644
      pressMic: () => {
        const mic = [...container.querySelectorAll("button")].find(
          (button) => button.textContent === "Start voice input",
-@@ -200,3 +204,34 @@ it("takes no transcript after the answer field unmounts", () => {
+@@ -204,3 +208,34 @@ it("takes no transcript after the answer field unmounts", () => {
    voice.onChangeDraftMessage("late");
    expect(screen.changes).toEqual([]);
  });
@@ -138,10 +138,10 @@ index 12b9a555e6..b4da8aabb1 100644
 +  screen.unmount();
 +});
 diff --git a/apps/mobile/src/state/use-selected-thread-requests.ts b/apps/mobile/src/state/use-selected-thread-requests.ts
-index b75faf6da9..c3c25b3fa3 100644
+index 2df48db073..d4e4ff145d 100644
 --- a/apps/mobile/src/state/use-selected-thread-requests.ts
 +++ b/apps/mobile/src/state/use-selected-thread-requests.ts
-@@ -39,7 +39,6 @@ import {
+@@ -41,7 +41,6 @@ import {
    userInputDraftKey,
  } from "@t3tools/client-runtime/state/thread-requests";
  import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -149,7 +149,7 @@ index b75faf6da9..c3c25b3fa3 100644
  
  import { environmentThreadDetails, threadEnvironment } from "./threads";
  import {
-@@ -53,12 +52,15 @@ import { useSelectedThreadPendingRequests } from "./use-thread-detail";
+@@ -55,12 +54,15 @@ import { useSelectedThreadPendingRequests } from "./use-thread-detail";
  import { useThreadSelection } from "./use-thread-selection";
  import { useAtomCommand } from "./use-atom-command";
  import { readEnvironmentScope } from "./session";
@@ -168,7 +168,7 @@ index b75faf6da9..c3c25b3fa3 100644
  
  // Writes start from the suggested answer the user was looking at.
  function seededDraft(
-@@ -74,7 +76,7 @@ function setUserInputDraftOption(
+@@ -76,7 +78,7 @@ function setUserInputDraftOption(
    value: string,
  ): void {
    const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
@@ -177,7 +177,7 @@ index b75faf6da9..c3c25b3fa3 100644
      ...current,
      [requestKey]: {
        ...current[requestKey],
-@@ -93,7 +95,7 @@ function setUserInputDraftCustomAnswer(
+@@ -95,7 +97,7 @@ function setUserInputDraftCustomAnswer(
    customAnswer: string,
  ): void {
    const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
@@ -186,7 +186,7 @@ index b75faf6da9..c3c25b3fa3 100644
      ...current,
      [requestKey]: {
        ...current[requestKey],
-@@ -119,7 +121,7 @@ function pruneResolvedRequestDrafts(
+@@ -122,7 +124,7 @@ function pruneResolvedRequestDrafts(
      threadId,
      pendingRequestIds,
    );
