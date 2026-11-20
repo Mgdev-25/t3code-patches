@@ -115,13 +115,13 @@ index da4179d6dd..1ce74bb398 100644
        />
        {props.pendingUserInput.dismissible ? (
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index c59c1890d0..9ed0f19d8a 100644
+index 176f23773a..454e2fbb71 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-@@ -32,6 +32,17 @@ import {
-   questionAttachmentDraftKey,
-   questionAttachmentPreparationAtom,
- } from "../../state/question-attachments";
+@@ -30,6 +30,17 @@ import {
+   pickQuestionAttachments,
+   startQuestionImagePreparation,
+ } from "../../state/question-attachment-preparation";
 +import type { ComposerEditorSelection } from "../../components/ComposerEditor";
 +import {
 +  ComposerDictationCancelAction,
@@ -136,7 +136,7 @@ index c59c1890d0..9ed0f19d8a 100644
  
  export function QuestionAttachments(props: {
    requestId: string;
-@@ -69,16 +80,52 @@ export function QuestionAttachments(props: {
+@@ -67,16 +78,52 @@ export function QuestionAttachments(props: {
    // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases keyboard ownership on unmount, since an unmounted native input never emits blur
    useEffect(() => () => releaseFocus(), []);
    // A controlled value makes Fabric rebuild the native text on every keystroke, which discards
@@ -192,7 +192,7 @@ index c59c1890d0..9ed0f19d8a 100644
    }, [props.value]);
    const append = (
      key: string,
-@@ -209,29 +256,79 @@ export function QuestionAttachments(props: {
+@@ -192,29 +239,79 @@ export function QuestionAttachments(props: {
        />
        <FilePreviewModal source={previewFile} onRequestClose={() => setPreviewFile(null)} />
        <VideoPreviewModal source={previewVideo} onRequestClose={() => setPreviewVideo(null)} />
@@ -297,10 +297,10 @@ index c59c1890d0..9ed0f19d8a 100644
  }
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 new file mode 100644
-index 0000000000..12b9a555e6
+index 0000000000..5df500db94
 --- /dev/null
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,206 @@
 +import type { UserInputQuestion } from "@t3tools/contracts";
 +import type { ReactNode } from "react";
 +import { act, forwardRef } from "react";
@@ -376,12 +376,16 @@ index 0000000000..12b9a555e6
 +  composerDraftsAtom: {},
 +  appendComposerDraftAttachments: () => 0,
 +  removeComposerDraftAttachment: () => {},
-+  releaseUnusedComposerAttachmentFiles: async () => {},
 +}));
 +vi.mock("../../state/question-attachments", () => ({
-+  changeQuestionAttachmentPreparation: () => {},
-+  questionAttachmentPreparationAtom: {},
 +  questionAttachmentDraftKey: (...parts: string[]) => parts.join(":"),
++}));
++vi.mock("../../state/question-attachment-preparation", () => ({
++  pickQuestionAttachments: async () => ({ rejected: 0 }),
++  startQuestionImagePreparation: () => ({
++    complete: async () => ({ rejected: 0 }),
++    finish: () => {},
++  }),
 +}));
 +vi.mock("../voice-input/voiceInputPresentation", () => ({
 +  resolveVoiceComposerPresentation: () => ({ statusKind: "idle" }),
@@ -504,10 +508,10 @@ index 0000000000..12b9a555e6
 +  expect(screen.changes).toEqual([]);
 +});
 diff --git a/apps/mobile/vite.config.ts b/apps/mobile/vite.config.ts
-index c25e9aad60..36517ee4c1 100644
+index 80fca082c7..e262a8d521 100644
 --- a/apps/mobile/vite.config.ts
 +++ b/apps/mobile/vite.config.ts
-@@ -33,6 +33,7 @@ const reactTests = [
+@@ -36,6 +36,7 @@ const reactTests = [
    "src/components/ui/FilePreviewSession.test.tsx",
    "src/features/threads/UsageLimitRecoveryCard.test.tsx",
    "src/features/threads/PendingUserInputCard.test.tsx",
