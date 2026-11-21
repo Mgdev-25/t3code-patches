@@ -18,6 +18,18 @@
       "head": "da4e902702f1b6e874440b7dcc0cf812518e2354",
       "bug": 1578,
       "file": "patches/upstream/pr-39799.patch"
+    },
+    {
+      "pr": 40244,
+      "head": "2e9755ca7c5d7c492c6041d1690d84525ec1e002",
+      "bug": 18,
+      "file": "patches/upstream/pr-40244.patch"
+    },
+    {
+      "pr": 37119,
+      "head": "407e45bde96712bb5e511f6848cc79eea3f5daf2",
+      "bug": 18,
+      "file": "patches/upstream/pr-37119.patch"
     }
   ],
   "own": [
