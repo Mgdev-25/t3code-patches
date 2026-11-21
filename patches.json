@@ -2,12 +2,6 @@
   "keepDays": 10,
   "upstream": [
     {
-      "pr": 34001,
-      "head": "09b1bcbbeb9bd02c3e42150786f18ef7a08a2a39",
-      "bug": 1408,
-      "file": "patches/upstream/pr-34001.patch"
-    },
-    {
       "pr": 25165,
       "head": "730a333a47ea0cbde7fe9bcf4ec525f8303ac542",
       "bug": 1410,
