@@ -1,13 +1,13 @@
 diff --git a/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts b/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
-index 060f23864c..145e6221c3 100644
+index 441c9992e7..127e6a8972 100644
 --- a/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
 +++ b/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts
 @@ -1414,7 +1414,7 @@ const seedRestartCancelledChild = (input: {
    readonly name: string;
    readonly completionWake: "always" | "settled_only";
    readonly continuationPending: boolean;
--  readonly runStatus?: "cancelled" | "completed";
-+  readonly runStatus?: "cancelled" | "completed" | "running";
+-  readonly runStatus?: "cancelled" | "completed" | "interrupted";
++  readonly runStatus?: "cancelled" | "completed" | "interrupted" | "running";
    readonly lostWork?: OrchestrationV2Run["restartCancelledBackgroundWork"];
    readonly now: DateTime.Utc;
  }) =>
@@ -337,10 +337,10 @@ index 060f23864c..145e6221c3 100644
              while (
                wake.threadId !== parentThreadId ||
 diff --git a/apps/server/src/orchestration-v2/Orchestrator.ts b/apps/server/src/orchestration-v2/Orchestrator.ts
-index 6bfd95eae1..44d0cbd6f6 100644
+index 00939843c1..2327d558ba 100644
 --- a/apps/server/src/orchestration-v2/Orchestrator.ts
 +++ b/apps/server/src/orchestration-v2/Orchestrator.ts
-@@ -101,6 +101,7 @@ import * as DateTime from "effect/DateTime";
+@@ -103,6 +103,7 @@ import * as DateTime from "effect/DateTime";
  import * as Effect from "effect/Effect";
  import * as Exit from "effect/Exit";
  import * as FileSystem from "effect/FileSystem";
@@ -348,7 +348,7 @@ index 6bfd95eae1..44d0cbd6f6 100644
  import * as Path from "effect/Path";
  import * as Layer from "effect/Layer";
  import * as Option from "effect/Option";
-@@ -176,6 +177,7 @@ import {
+@@ -179,6 +180,7 @@ import {
    threadShellFromProjection,
    ProjectionStoreV2,
    type ProjectionRecordField,
@@ -356,7 +356,7 @@ index 6bfd95eae1..44d0cbd6f6 100644
    type ProjectionTimelinePage,
    type ProjectionTimelinePageOptions,
    type ProjectionRecordFilter,
-@@ -1645,6 +1647,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -1651,6 +1653,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    const threadForkService = yield* ThreadForkServiceV2;
    const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
    const messageIntake = yield* KeyedLock.make<ThreadId>();
@@ -368,7 +368,7 @@ index 6bfd95eae1..44d0cbd6f6 100644
    // Read once: the policy is fixed for the server's life, and dispatch takes it as an input.
    const { managedPolicy } = serverSettings;
    const runtimeModeCeiling: RuntimeModeCeiling | undefined =
-@@ -2062,7 +2069,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -2068,7 +2075,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
  
    const offerDelegatedCompletionDelivery =
      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -381,7 +381,7 @@ index 6bfd95eae1..44d0cbd6f6 100644
        const controls = yield* projectionStore.getThreadRecords(threadId, ["runs"], {
          runIds: [parentRunId],
        });
-@@ -2094,6 +2105,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -2100,6 +2111,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
          if (!isUndeliveredMailboxSteer({ ...messages, ...runs, ...turns }, delivery.messageId))
            return;
        }
@@ -436,7 +436,7 @@ index 6bfd95eae1..44d0cbd6f6 100644
        const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"], {
          providerThreadIds: parentRun.providerThreadId === null ? [] : [parentRun.providerThreadId],
        });
-@@ -15085,8 +15144,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -15242,8 +15301,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
        yield* writeSystemEvents(completionEvents, [], { updateDelegatedCompletionOnly: true });
        yield* releaseFinishedDelegateSessions(childThreadId, childRun.id, task.id);
  
