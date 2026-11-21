@@ -8,15 +8,16 @@
 //   desktop-state  --server <result> --desktop <result>  the desktop state from the 2 job results
 //   desktop-source --tag <tag>                       the store release whose desktop files to keep
 //   desktop-check  --dir <dir> --version <v> --app-update <file>  check a built desktop app
+//   previous-report --tag <tag> --out <file>         download PATCHES.json of the prior store release
 //   report  --plan <f> --apply <f> --notices <f> --server <state> --android <state>
-//           --desktop <state> [--desktop-from <tag>] --out <dir>
+//           --desktop <state> [--desktop-from <tag>] [--upstream-notes <f>] [--prev-report <f>] --out <dir>
 //   prune   --keep-days <n>                          delete store releases older than n days
 //
 // Each command prints one JSON line. The pure functions below have tests in store.test.ts.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, renameSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -52,6 +53,8 @@ export type Part = "server" | "mobile";
 export interface Applied {
   readonly id: string;
   readonly parts: ReadonlyArray<Part>;
+  /** First 12 hex chars of the patch file's SHA-256, so release notes spot rebased patches. */
+  readonly sha256?: string;
 }
 
 export interface Skipped {
@@ -387,7 +390,72 @@ export function buildReport(input: {
   };
 }
 
-export function releaseNotes(report: Report): string {
+/** The newest store nightly strictly older than `tag` that holds PATCHES.json, or undefined. */
+export function previousReportTag(releases: ReadonlyArray<ReleaseAssets>, tag: string): string | undefined {
+  return releases
+    .filter((release) => NIGHTLY_TAG.test(release.tagName) && compareNightly(release.tagName, tag) < 0)
+    .filter((release) => release.assets.includes("PATCHES.json"))
+    .sort((a, b) => compareNightly(b.tagName, a.tagName))[0]?.tagName;
+}
+
+const FULL_CHANGELOG_MARKER = /<details>\s*<summary>\s*Full changelog\s*<\/summary>/i;
+
+/**
+ * One bullet in upstream T3 Code's release note style when patches changed compared to the
+ * previous store release, a patch was left out, a PR closed, or a build failed. Null when clean
+ * and unchanged so the update notice stays pure upstream T3 Code notes.
+ */
+export function patchChangeLine(report: Report, previous?: Report | null): string | null {
+  const clauses: string[] = [];
+  const merged = new Set(
+    report.notices.filter((notice) => notice.kind === "merged").map((notice) => `pr-${notice.pr}`),
+  );
+  if (previous !== null && previous !== undefined) {
+    const prevApplied = new Map(previous.applied.map((item) => [item.id, item.sha256] as const));
+    const added = report.applied.filter((item) => !prevApplied.has(item.id)).map((item) => item.id);
+    const updated = report.applied
+      .filter((item) => {
+        const prevHash = prevApplied.get(item.id);
+        return prevHash !== undefined && item.sha256 !== undefined && prevHash !== item.sha256;
+      })
+      .map((item) => item.id);
+    const currentApplied = new Set(report.applied.map((item) => item.id));
+    const skippedIds = new Set(report.skipped.map((item) => item.id));
+    const prevIds = [
+      ...previous.applied.map((item) => item.id),
+      ...previous.skipped.map((item) => item.id),
+    ];
+    const dropped = [
+      ...new Set([
+        ...prevIds.filter((id) => !currentApplied.has(id) && !skippedIds.has(id)),
+        ...merged,
+      ]),
+    ];
+    if (added.length > 0) clauses.push(`added ${added.join(", ")}`);
+    if (updated.length > 0) clauses.push(`updated ${updated.join(", ")}`);
+    if (dropped.length > 0) clauses.push(`dropped ${dropped.join(", ")}`);
+  } else if (merged.size > 0) {
+    clauses.push(`dropped ${[...merged].join(", ")}`);
+  }
+  if (report.skipped.length > 0) {
+    clauses.push(`left out ${report.skipped.map((item) => item.id).join(", ")}`);
+  }
+  const closed = report.notices
+    .filter((notice) => notice.kind === "closed")
+    .map((notice) => `pr-${notice.pr}`);
+  if (closed.length > 0) clauses.push(`closed upstream ${closed.join(", ")}`);
+  const failed = [
+    ...(report.server === "failed" ? ["server"] : []),
+    ...(report.desktop === "failed" ? ["desktop"] : []),
+    ...(report.android === "failed" ? ["android"] : []),
+  ];
+  if (failed.length > 0) clauses.push(`${failed.join(", ")} build failed`);
+  if (clauses.length === 0) return null;
+  const text = clauses.join(", ");
+  return `- **Store patches updated.** ${text[0]!.toUpperCase()}${text.slice(1)}.`;
+}
+
+function storeSummary(report: Report): string {
   const line = (applied: Applied) => `- ${applied.id} (${applied.parts.join(", ") || "docs"})`;
   return [
     `Upstream ${report.upstreamTag} plus the patches below.`,
@@ -409,6 +477,39 @@ export function releaseNotes(report: Report): string {
     "",
     "PATCHES.json holds the same data.",
   ].join("\n");
+}
+
+function insertSummaryBullet(upstreamNotes: string, bullet: string): string {
+  const detailsIdx = upstreamNotes.search(FULL_CHANGELOG_MARKER);
+  const head = detailsIdx >= 0 ? upstreamNotes.slice(0, detailsIdx) : upstreamNotes;
+  const tail = detailsIdx >= 0 ? upstreamNotes.slice(detailsIdx) : "";
+  const plusMatch = /\n+### Plus \d+ more /m.exec(head);
+  if (plusMatch !== null) {
+    return `${head.slice(0, plusMatch.index)}\n${bullet}${head.slice(plusMatch.index)}${tail}`;
+  }
+  if (detailsIdx >= 0) {
+    return `${head.trimEnd()}\n${bullet}\n\n${tail}`;
+  }
+  return `${head.trimEnd()}\n${bullet}`;
+}
+
+export function releaseNotes(
+  report: Report,
+  options?: {
+    readonly upstreamNotes?: string | undefined;
+    readonly previousReport?: Report | null | undefined;
+  },
+): string {
+  const upstream = options?.upstreamNotes?.trim();
+  if (!upstream) return storeSummary(report);
+  const bullet = patchChangeLine(report, options?.previousReport);
+  const body = bullet === null ? upstream : insertSummaryBullet(upstream, bullet);
+  // T3 Desktop parses only text before `<details><summary>Full changelog</summary>`, so a second
+  // collapsed block after it keeps full patch status on GitHub without polluting the update popup.
+  if (FULL_CHANGELOG_MARKER.test(body)) {
+    return `${body}\n\n<details>\n<summary>Store patches</summary>\n\n${storeSummary(report)}\n\n</details>`;
+  }
+  return body;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -515,15 +616,20 @@ function applyList(src: string, skip: ReadonlySet<string>): ApplyResult {
       continue;
     }
     const patchFile = join(process.cwd(), entry.file);
-    const paths = patchPaths(readFileSync(patchFile, "utf8"));
+    const content = readFileSync(patchFile, "utf8");
+    const paths = patchPaths(content);
     const refusal = refusalOf(paths);
     if (refusal !== undefined) {
       skipped.push({ id, reason: refusal });
       continue;
     }
     const result = tryRun("git", ["apply", "--whitespace=nowarn", patchFile], src);
-    if (result.ok) applied.push({ id, parts: partsOf(paths) });
-    else skipped.push({ id, reason: `does not apply: ${result.out}` });
+    if (result.ok) {
+      const sha256 = createHash("sha256").update(content).digest("hex").slice(0, 12);
+      applied.push({ id, parts: partsOf(paths), sha256 });
+    } else {
+      skipped.push({ id, reason: `does not apply: ${result.out}` });
+    }
   }
   return {
     applied,
@@ -638,6 +744,25 @@ function main(argv: ReadonlyArray<string>) {
       if (errors.length > 0) process.exitCode = 1;
       return;
     }
+    case "previous-report": {
+      const repo = storeRepo();
+      const tag = required(args, "--tag");
+      const out = required(args, "--out");
+      const prevTag = previousReportTag(listReleaseAssets(repo), tag) ?? null;
+      if (prevTag !== null) {
+        const tmp = `${out}.tmp`;
+        try {
+          run("gh", ["release", "download", prevTag, "--repo", repo, "--pattern", "PATCHES.json", "--output", tmp, "--clobber"]);
+          readJson<Report>(tmp);
+          renameSync(tmp, out);
+        } catch (error) {
+          if (existsSync(tmp)) unlinkSync(tmp);
+          throw error;
+        }
+      }
+      console.log(JSON.stringify({ from: prevTag }));
+      return;
+    }
     case "report": {
       const report = buildReport({
         plan: readJson<Plan>(required(args, "--plan")),
@@ -648,9 +773,17 @@ function main(argv: ReadonlyArray<string>) {
         desktop: required(args, "--desktop") as BuildState,
         desktopFrom: argValue(args, "--desktop-from") || undefined,
       });
+      const upstreamNotesFile = argValue(args, "--upstream-notes");
+      const upstreamNotes =
+        upstreamNotesFile && existsSync(upstreamNotesFile) ? readFileSync(upstreamNotesFile, "utf8") : undefined;
+      const prevReportFile = argValue(args, "--prev-report");
+      let previousReport: Report | null = null;
+      if (prevReportFile && existsSync(prevReportFile) && statSync(prevReportFile).size > 0) {
+        previousReport = readJson<Report>(prevReportFile);
+      }
       const out = required(args, "--out");
       writeJson(join(out, "PATCHES.json"), report);
-      writeFileSync(join(out, "notes.md"), `${releaseNotes(report)}\n`);
+      writeFileSync(join(out, "notes.md"), `${releaseNotes(report, { upstreamNotes, previousReport })}\n`);
       console.log(JSON.stringify(report));
       return;
     }
