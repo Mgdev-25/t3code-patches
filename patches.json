@@ -12,6 +12,12 @@
       "head": "ac701d674ae393df510e68220291efc89fffcb6f",
       "bug": 1409,
       "file": "patches/upstream/pr-36186.patch"
+    },
+    {
+      "pr": 39799,
+      "head": "da4e902702f1b6e874440b7dcc0cf812518e2354",
+      "bug": 1578,
+      "file": "patches/upstream/pr-39799.patch"
     }
   ],
   "own": [

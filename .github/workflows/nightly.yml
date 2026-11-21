@@ -549,9 +549,35 @@ jobs:
           ANDROID_RESULT: ${{ needs.android.result }}
         run: |
           case "$ANDROID_RESULT" in success) android=built ;; skipped) android=not-needed ;; *) android=failed ;; esac
+          fetched=false
+          for try in 1 2 3; do
+            if gh release view "$TAG" --repo "$UPSTREAM" --json body --jq .body > "$RUNNER_TEMP/upstream-notes.md.tmp"; then
+              mv "$RUNNER_TEMP/upstream-notes.md.tmp" "$RUNNER_TEMP/upstream-notes.md"
+              fetched=true
+              break
+            fi
+            rm -f "$RUNNER_TEMP/upstream-notes.md.tmp"
+            echo "upstream notes fetch try $try failed"
+            sleep 5
+          done
+          [ "$fetched" = true ] || { echo "::error::failed to fetch upstream release notes for $TAG"; exit 1; }
+          prev_ok=false
+          prev_arg=()
+          for try in 1 2 3; do
+            if node scripts/store.ts previous-report --tag "$TAG" --out "$RUNNER_TEMP/prev-patches.json"; then
+              [ -f "$RUNNER_TEMP/prev-patches.json" ] && prev_arg=(--prev-report "$RUNNER_TEMP/prev-patches.json")
+              prev_ok=true
+              break
+            fi
+            rm -f "$RUNNER_TEMP/prev-patches.json"
+            echo "previous report fetch try $try failed"
+            sleep 5
+          done
+          [ "$prev_ok" = true ] || { echo "::error::failed to fetch previous store report for $TAG"; exit 1; }
           node scripts/store.ts report --plan "$RUNNER_TEMP/in/plan/plan.json" --apply "$RUNNER_TEMP/in/plan/apply.json" \
             --notices "$RUNNER_TEMP/in/plan/notices.json" --server "${{ steps.server.outputs.state }}" --android "$android" \
-            --desktop "${{ steps.desktop.outputs.state }}" --desktop-from "${{ steps.desktop.outputs.from }}" --out out
+            --desktop "${{ steps.desktop.outputs.state }}" --desktop-from "${{ steps.desktop.outputs.from }}" \
+            --upstream-notes "$RUNNER_TEMP/upstream-notes.md" "${prev_arg[@]}" --out out
           if [ "${{ steps.server.outputs.state }}" = built ]; then
             cp "$RUNNER_TEMP/in/server/t3-$VERSION-linux-x64.tar.gz" out/
             node scripts/store.ts marker --archive "out/t3-$VERSION-linux-x64.tar.gz" --report out/PATCHES.json
