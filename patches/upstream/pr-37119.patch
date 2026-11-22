@@ -1,8 +1,8 @@
 diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
-index b281ecc16ab84..e3a3dfb237f8c 100644
+index 5cbb4975..d82b9619 100644
 --- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
-@@ -1274,3 +1274,169 @@ describe("AntigravityAdapterV2 session system prompt", () => {
+@@ -2624,3 +2624,169 @@ describe("AntigravityAdapterV2 session system prompt", () => {
        }).pipe(Effect.provide(layerSession)),
    );
  });
@@ -173,18 +173,18 @@ index b281ecc16ab84..e3a3dfb237f8c 100644
 +  );
 +});
 diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-index 3f629c813b6152f66fc6db08ff7944f1a9d57a34..1304281d7d084a9bf570a1b595540dd9f283692c 100644
+index c20afa04..23c01441 100644
 --- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-@@ -43,6 +43,7 @@ import {
-   antigravityToolOutlivesPrompt,
+@@ -44,6 +44,7 @@ import {
+   antigravityCommandOutlivesPrompt,
    antigravitySubagentOutput,
    classifyAntigravitySubagentToolCall,
 +  extractAntigravityElicitationForm,
    extractAntigravityUserInputQuestion,
    makeAntigravityReadRepair,
    makeAntigravityUserInputResponse,
-@@ -284,6 +285,7 @@ export function makeAntigravityAcpAdapterFlavor(
+@@ -291,6 +292,7 @@ export function makeAntigravityAcpAdapterFlavor(
          respond: (answers) => makeAntigravityUserInputResponse(request, answers),
        };
      },
@@ -193,7 +193,7 @@ index 3f629c813b6152f66fc6db08ff7944f1a9d57a34..1304281d7d084a9bf570a1b595540dd9
      extractSubagentUpdate: extractAntigravitySubagentUpdate,
      supportsImagePrompts: true,
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.ts b/apps/server/src/provider/acp/AntigravityProtocol.ts
-index 5b74756a1de11..4e708240782b7 100644
+index 2e59a78e..98c7b750 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.ts
 @@ -1,7 +1,9 @@
@@ -218,7 +218,7 @@ index 5b74756a1de11..4e708240782b7 100644
  import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
  
  import {
-@@ -164,6 +167,75 @@ export function makeAntigravityUserInputResponse(
+@@ -184,6 +187,75 @@ export function makeAntigravityUserInputResponse(
    return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : undefined;
  }
  
