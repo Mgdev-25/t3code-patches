@@ -8,15 +8,18 @@ import {
   checkDesktopManifest,
   compareNightly,
   desktopState,
+  isPublishedServerBaseline,
   lastDesktopRelease,
   parseUpdateManifest,
-  patchChangeLine,
-  previousReportTag,
+  patchChangeLines,
+  preserveSameTagMergedNotices,
+  previousReportTags,
   releaseNotes,
   partsOf,
   patchPaths,
   refusalOf,
   releasesToPrune,
+  selectPreviousBaseline,
   selectTarget,
   syncEntries,
   validateList,
@@ -85,8 +88,8 @@ test("a patch that adds a database migration is refused", () => {
   assert.equal(refusalOf(["apps/server/src/x.ts"]), undefined);
 });
 
-test("the list allows at most 8 own patches, each with a check and a drop line", () => {
-  const own = (id: string) => ({ id, bug: 1, file: "f", check: "c", dropWhen: "d" });
+test("the list allows at most 8 own patches, each with title, summary, check and dropWhen", () => {
+  const own = (id: string) => ({ id, bug: 1, file: "f", title: "Title", summary: "Summary.", check: "c", dropWhen: "d" });
   const list: PatchList = {
     keepDays: 10,
     upstream: [],
@@ -95,9 +98,19 @@ test("the list allows at most 8 own patches, each with a check and a drop line",
   assert.match(validateList(list).join(), /cap is 8/);
   assert.deepEqual(validateList({ ...list, own: list.own.slice(0, 8) }), []);
   assert.match(validateList({ ...list, own: [{ ...own("x"), dropWhen: " " }] }).join(), /dropWhen/);
+  assert.match(validateList({ ...list, own: [{ ...own("x"), title: " " }] }).join(), /title and a summary/);
+  assert.match(validateList({ ...list, own: [{ ...own("x"), title: "Bad *title*" }] }).join(), /'\*'/);
+  assert.match(validateList({ ...list, own: [{ ...own("x"), summary: "Line 1\nLine 2" }] }).join(), /single line/);
 });
 
-const entry = (pr: number): UpstreamEntry => ({ pr, head: SHA, bug: 1, file: `p/${pr}.patch` });
+const entry = (pr: number): UpstreamEntry => ({
+  pr,
+  head: SHA,
+  bug: 1,
+  file: `p/${pr}.patch`,
+  title: `Patch ${pr}`,
+  summary: `Fixes ${pr}.`,
+});
 
 test("a PR merged into the tag leaves the list, others stay with notices", () => {
   const states = new Map<number, PrState>([
@@ -113,15 +126,16 @@ test("a PR merged into the tag leaves the list, others stay with notices", () =>
     // m2 merged after the tag was cut, so the tag does not hold it yet.
     inTag: (commit) => commit === "m1",
     tag: "v0.1.10-nightly.20261115.4723",
+    partsOfEntry: (item) => (item.pr === 4 ? ["mobile"] : ["server"]),
   });
   assert.deepEqual(
     result.keep.map((item) => item.pr),
     [2, 3, 4, 5],
   );
   assert.deepEqual(result.notices, [
-    { kind: "merged", pr: 1, tag: "v0.1.10-nightly.20261115.4723" },
+    { kind: "merged", pr: 1, tag: "v0.1.10-nightly.20261115.4723", title: "Patch 1", parts: ["server"] },
     { kind: "new-head", pr: 3, head: "c".repeat(40) },
-    { kind: "closed", pr: 4 },
+    { kind: "closed", pr: 4, title: "Patch 4", parts: ["mobile"] },
   ]);
 });
 
@@ -241,58 +255,100 @@ const UPSTREAM_NOTES = `**v0.1.12-nightly.20261121.5051** · 38 changes from 9 c
 * fix(server): something
 </details>`;
 
-test("previousReportTag picks the newest store nightly strictly older than the target with PATCHES.json", () => {
+test("previousReportTags lists store nightlies strictly older than the target with PATCHES.json newest first", () => {
   const releases = [
     { tagName: "v0.1.12-nightly.20261121.5051", assets: ["PATCHES.json"] },
     { tagName: "v0.1.12-nightly.20261121.5045", assets: ["SHA256SUMS"] },
     { tagName: "v0.1.12-nightly.20261121.5038", assets: ["PATCHES.json"] },
     { tagName: "v0.1.12-nightly.20261121.5024", assets: ["PATCHES.json"] },
   ];
-  assert.equal(previousReportTag(releases, "v0.1.12-nightly.20261121.5051"), "v0.1.12-nightly.20261121.5038");
-  assert.equal(previousReportTag(releases, "v0.1.12-nightly.20261121.5024"), undefined);
+  assert.deepEqual(previousReportTags(releases, "v0.1.12-nightly.20261121.5051"), [
+    "v0.1.12-nightly.20261121.5038",
+    "v0.1.12-nightly.20261121.5024",
+  ]);
+  assert.deepEqual(previousReportTags(releases, "v0.1.12-nightly.20261121.5024"), []);
 });
 
-test("releaseNotes keeps pure upstream notes when patches did not change", () => {
-  const plan = { needed: true, tag: "v0.1.12-nightly.20261121.5051", version: "0.1.12-nightly.20261121.5051", latest: true };
-  const prev = buildReport({
-    plan: { ...plan, tag: "v0.1.12-nightly.20261121.5038", version: "0.1.12-nightly.20261121.5038" },
-    apply: { applied: [{ id: "pr-25165", parts: ["server"], sha256: "aaaaaaaaaaaa" }], skipped: [], server: true, mobile: false },
-    notices: [],
-    server: "built",
-    android: "not-needed",
-    desktop: "built",
-  });
-  const current = buildReport({
-    plan,
-    apply: { applied: [{ id: "pr-25165", parts: ["server"], sha256: "aaaaaaaaaaaa" }], skipped: [], server: true, mobile: false },
-    notices: [],
-    server: "built",
-    android: "not-needed",
-    desktop: "built",
-  });
-  assert.equal(patchChangeLine(current, prev), null);
-  const notes = releaseNotes(current, { upstreamNotes: UPSTREAM_NOTES, previousReport: prev });
-  const beforeDetails = notes.slice(0, notes.indexOf("<details>\n<summary>Full changelog</summary>"));
-  assert.doesNotMatch(beforeDetails, /Store patches updated/);
-  assert.match(beforeDetails, /\*\*Queued slash commands\.\*\*/);
-  assert.match(notes, /<details>\n<summary>Store patches<\/summary>/);
-
-  // Older PATCHES.json entries without sha256 compare by id without false updates.
-  const legacyPrev = { ...prev, applied: [{ id: "pr-25165", parts: ["server"] as const }] };
-  assert.equal(patchChangeLine(current, legacyPrev), null);
-});
-
-test("releaseNotes adds one upstream-style bullet when patches are added, updated, dropped, or fail", () => {
+test("releaseNotes keeps pure upstream notes when server patches did not change", () => {
   const plan = { needed: true, tag: "v0.1.12-nightly.20261121.5051", version: "0.1.12-nightly.20261121.5051", latest: true };
   const prev = buildReport({
     plan: { ...plan, tag: "v0.1.12-nightly.20261121.5038", version: "0.1.12-nightly.20261121.5038" },
     apply: {
       applied: [
-        { id: "pr-25165", parts: ["server"], sha256: "111111111111" },
-        { id: "1456-notice-hold", parts: ["server"], sha256: "222222222222" },
-        { id: "pr-36186", parts: ["mobile"], sha256: "333333333333" },
+        { id: "pr-25165", parts: ["server"], sha256: "aaaaaaaaaaaa", title: "Muse Code usage limits", summary: "Shows Muse Code usage." },
+        { id: "pr-36186", parts: ["mobile"], sha256: "bbbbbbbbbbbb", title: "Remote dictation language", summary: "Sends selected language." },
       ],
-      skipped: [{ id: "pr-99999", reason: "does not apply" }],
+      skipped: [
+        { id: "pr-36187", reason: "does not apply" },
+        { id: "1472-codex-credits", reason: "does not apply", parts: ["server"], title: "Voice cleanup Codex credits", summary: "Keeps Codex Terra while credits remain." },
+      ],
+      server: true,
+      mobile: true,
+    },
+    notices: [{ kind: "closed", pr: 25165, title: "Muse Code usage limits", parts: ["server"] }],
+    server: "built",
+    android: "built",
+    desktop: "built",
+  });
+  const current = buildReport({
+    plan,
+    apply: {
+      applied: [
+        { id: "pr-25165", parts: ["server"], sha256: "aaaaaaaaaaaa", title: "Muse Code usage limits", summary: "Shows Muse Code usage." },
+        // Mobile-only additions, updates, skips, closures, merges, and android build failures stay out of the desktop popup.
+        { id: "pr-36186", parts: ["mobile"], sha256: "cccccccccccc", title: "Remote dictation language", summary: "Sends selected language." },
+        { id: "1407-notice-link", parts: ["mobile"], sha256: "dddddddddddd", title: "Phone notification deep link", summary: "Opens the tapped chat." },
+      ],
+      skipped: [
+        { id: "1448-form-free-text-mic", reason: "does not apply", parts: ["mobile"], title: "Question form mic button", summary: "Shows mic in form." },
+        // Consecutive skip for the same server patch does not repeat in the popup.
+        { id: "1472-codex-credits", reason: "does not apply", parts: ["server"], title: "Voice cleanup Codex credits", summary: "Keeps Codex Terra while credits remain." },
+      ],
+      server: true,
+      mobile: true,
+    },
+    // Repeat closed notice for pr-25165 does not re-emit; mobile merged/closed PRs stay out of desktop popup.
+    notices: [
+      { kind: "closed", pr: 25165, title: "Muse Code usage limits", parts: ["server"] },
+      { kind: "closed", pr: 36186, title: "Remote dictation language", parts: ["mobile"] },
+      { kind: "merged", pr: 36187, tag: plan.tag, title: "Mobile dictation tweak", parts: ["mobile"] },
+    ],
+    server: "built",
+    android: "failed",
+    desktop: "built",
+  });
+  assert.deepEqual(patchChangeLines(current, prev), []);
+  const notes = releaseNotes(current, { upstreamNotes: UPSTREAM_NOTES, previousReport: prev });
+  const beforeDetails = notes.slice(0, notes.indexOf("<details>\n<summary>Full changelog</summary>"));
+  assert.doesNotMatch(beforeDetails, /Muse Code|Remote dictation|Phone notification|Question form|Mobile dictation|Store build/);
+  assert.match(beforeDetails, /\*\*Queued slash commands\.\*\*/);
+  assert.match(notes, /<details>\n<summary>Store patches<\/summary>/);
+
+  // Older PATCHES.json entries without sha256 or title compare by id without false updates,
+  // and missing parts on a legacy skipped entry do not leak into the desktop popup.
+  const legacyPrev = {
+    ...prev,
+    applied: [{ id: "pr-25165", parts: ["server"] as const }],
+    skipped: [
+      { id: "pr-36187", reason: "does not apply" },
+      { id: "1472-codex-credits", reason: "does not apply" },
+    ],
+  };
+  assert.deepEqual(patchChangeLines(current, legacyPrev), []);
+});
+
+test("releaseNotes adds descriptive upstream-style bullets for changed server patches and combines new closures", () => {
+  const plan = { needed: true, tag: "v0.1.12-nightly.20261121.5051", version: "0.1.12-nightly.20261121.5051", latest: true };
+  // Legacy previous report (like 5071) lacks title/summary on applied entries; merge notice supplies the title.
+  const prev = buildReport({
+    plan: { ...plan, tag: "v0.1.12-nightly.20261121.5038", version: "0.1.12-nightly.20261121.5038" },
+    apply: {
+      applied: [
+        { id: "pr-25165", parts: ["server"], sha256: "111111111111" },
+        { id: "1456-notice-hold", parts: ["server"], sha256: "222222222222", title: "Child end notice hold", summary: "Groups child end notices up to 120 seconds." },
+        { id: "pr-36186", parts: ["mobile"], sha256: "333333333333", title: "Remote dictation language", summary: "Sends selected language." },
+      ],
+      skipped: [{ id: "pr-99999", reason: "does not apply", parts: ["server"], title: "Old server fix", summary: "Old fix." }],
       server: true,
       mobile: true,
     },
@@ -305,30 +361,225 @@ test("releaseNotes adds one upstream-style bullet when patches are added, update
     plan,
     apply: {
       applied: [
-        { id: "pr-39799", parts: ["server"], sha256: "444444444444" },
-        { id: "1456-notice-hold", parts: ["server"], sha256: "555555555555" },
+        { id: "pr-39799", parts: ["server"], sha256: "444444444444", title: "Antigravity message queue", summary: "Queues messages while a question waits." },
+        { id: "1456-notice-hold", parts: ["server"], sha256: "555555555555", title: "Child end notice hold", summary: "Groups child end notices up to 120 seconds." },
       ],
-      skipped: [{ id: "pr-36186", reason: "does not apply" }],
+      skipped: [
+        { id: "pr-36186", reason: "does not apply", parts: ["mobile"], title: "Remote dictation language", summary: "Sends selected language." },
+        { id: "1472-codex-credits", reason: "does not apply", parts: ["server"], title: "Voice cleanup Codex credits", summary: "Keeps Codex Terra while credits remain." },
+      ],
       server: true,
       mobile: false,
     },
-    notices: [{ kind: "merged", pr: 25165, tag: plan.tag }],
+    notices: [
+      { kind: "merged", pr: 25165, tag: plan.tag, title: "Muse Code usage limits", parts: ["server"] },
+      { kind: "closed", pr: 39799, title: "Antigravity message queue", parts: ["server"] },
+    ],
+    server: "built",
+    android: "not-needed",
+    desktop: "built",
+  });
+  const bullets = patchChangeLines(current, prev);
+  assert.deepEqual(bullets, [
+    "- **Antigravity message queue (closed upstream).** Queues messages while a question waits. Upstream PR closed without merge, review needed.",
+    "- **Child end notice hold (updated).** Groups child end notices up to 120 seconds.",
+    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+    "- **Old server fix (dropped).** Removed from the store patch list.",
+    "- **Voice cleanup Codex credits (left out).** Not included in this build. Keeps Codex Terra while credits remain.",
+  ]);
+  const notes = releaseNotes(current, { upstreamNotes: UPSTREAM_NOTES, previousReport: prev });
+  assert.ok(
+    notes.includes(
+      "- **Full file names.** Hover over truncated names in the Files tree.\n" +
+        bullets.join("\n") +
+        "\n\n### Plus 24 more bug fixes and performance improvements.",
+    ),
+  );
+});
+
+test("failed server builds emit only the failure bullet, desktop-only failures keep shipped server bullets", () => {
+  const plan = { needed: true, tag: "v0.1.12-nightly.20261121.5051", version: "0.1.12-nightly.20261121.5051", latest: true };
+  const prev = buildReport({
+    plan: { ...plan, tag: "v0.1.12-nightly.20261121.5038", version: "0.1.12-nightly.20261121.5038" },
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: [],
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  const failed = buildReport({
+    plan,
+    apply: {
+      applied: [{ id: "pr-39799", parts: ["server"], sha256: "444444444444", title: "Antigravity message queue", summary: "Queues messages while a question waits." }],
+      skipped: [],
+      server: true,
+      mobile: false,
+    },
+    notices: [],
+    server: "failed",
+    android: "not-needed",
+    desktop: "failed",
+    desktopFrom: "v0.1.12-nightly.20261121.5038",
+  });
+  assert.equal(isPublishedServerBaseline(prev), true);
+  assert.equal(isPublishedServerBaseline(failed), false);
+  // Failed server build does not advertise pr-39799 even though apply succeeded.
+  assert.deepEqual(patchChangeLines(failed, prev), [
+    "- **Store build failed.** Server and desktop build failed, check the release details.",
+  ]);
+  // Desktop-only failure still shipped the patched server archive, so it keeps patch bullets plus the failure bullet.
+  const desktopOnlyFailed = buildReport({
+    plan,
+    apply: {
+      applied: [{ id: "pr-39799", parts: ["server"], sha256: "444444444444", title: "Antigravity message queue", summary: "Queues messages while a question waits." }],
+      skipped: [],
+      server: true,
+      mobile: false,
+    },
+    notices: [],
     server: "built",
     android: "not-needed",
     desktop: "failed",
     desktopFrom: "v0.1.12-nightly.20261121.5038",
   });
-  const bullet = patchChangeLine(current, prev);
-  assert.equal(
-    bullet,
-    "- **Store patches updated.** Added pr-39799, updated 1456-notice-hold, dropped pr-25165, pr-99999, left out pr-36186, desktop build failed.",
-  );
-  const notes = releaseNotes(current, { upstreamNotes: UPSTREAM_NOTES, previousReport: prev });
+  assert.equal(isPublishedServerBaseline(desktopOnlyFailed), true);
+  assert.deepEqual(patchChangeLines(desktopOnlyFailed, prev), [
+    "- **Antigravity message queue.** Queues messages while a question waits.",
+    "- **Store build failed.** Desktop build failed, check the release details.",
+  ]);
+  // Without a healthy baseline, a merged mobile PR without server scope stays out of the desktop popup.
+  const mergedWithoutBaseline = buildReport({
+    plan,
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: [
+      { kind: "merged", pr: 36186, tag: plan.tag, title: "Remote dictation language", parts: ["mobile"] },
+      { kind: "merged", pr: 25165, tag: plan.tag, title: "Muse Code usage limits", parts: ["server"] },
+    ],
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  assert.deepEqual(patchChangeLines(mergedWithoutBaseline, failed), [
+    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+  ]);
+  // Carrying merge notices across a failed release preserves "(merged upstream)" on the next healthy release.
+  const healthyBefore = buildReport({
+    plan: { ...plan, tag: "v0.1.12-nightly.20261121.5038", version: "0.1.12-nightly.20261121.5038" },
+    apply: {
+      applied: [{ id: "pr-25165", parts: ["server"], sha256: "111111111111" }],
+      skipped: [],
+      server: true,
+      mobile: false,
+    },
+    notices: [],
+    server: "built",
+    android: "not-needed",
+    desktop: "built",
+  });
+  const failedAfterSync = buildReport({
+    plan,
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: [{ kind: "merged", pr: 25165, tag: plan.tag, title: "Muse Code usage limits", parts: ["server"] }],
+    server: "failed",
+    android: "not-needed",
+    desktop: "failed",
+    desktopFrom: "v0.1.12-nightly.20261121.5038",
+  });
+  const baseline = selectPreviousBaseline([failedAfterSync, healthyBefore]);
+  assert.ok(baseline.baseline !== null);
+  const healthyNext = buildReport({
+    plan: { ...plan, tag: "v0.1.12-nightly.20261122.5072", version: "0.1.12-nightly.20261122.5072" },
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: [],
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  assert.deepEqual(patchChangeLines(healthyNext, baseline), [
+    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+  ]);
+  // A replace run for the same tag keeps the older baseline and preserves merge notices from the replaced report.
+  const firstRunOfTag = buildReport({
+    plan,
+    apply: { applied: [], skipped: [{ id: "1456-notice-hold", reason: "does not apply", parts: ["server"], title: "Child end notice hold", summary: "Groups child end notices." }], server: false, mobile: false },
+    notices: [{ kind: "merged", pr: 25165, tag: plan.tag, title: "Muse Code usage limits", parts: ["server"] }],
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  const replaceBaseline = selectPreviousBaseline([healthyBefore], firstRunOfTag);
+  assert.ok(replaceBaseline.baseline !== null);
+  const restoredNotices = preserveSameTagMergedNotices([], replaceBaseline, plan.tag);
+  assert.equal(restoredNotices.length, 1);
+  const replacedReport = buildReport({
+    plan,
+    apply: { applied: [{ id: "1456-notice-hold", parts: ["server"], sha256: "222222222222", title: "Child end notice hold", summary: "Groups child end notices." }], skipped: [], server: true, mobile: false },
+    notices: restoredNotices,
+    server: "built",
+    android: "not-needed",
+    desktop: "built",
+  });
+  assert.deepEqual(patchChangeLines(replacedReport, replaceBaseline), [
+    "- **Child end notice hold.** Groups child end notices.",
+    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+  ]);
+  // A replace run with no older healthy baseline still preserves same-tag merge notices in both bullets and PATCHES.json.
+  const replaceNoBaseline = selectPreviousBaseline([], firstRunOfTag);
+  assert.equal(replaceNoBaseline.baseline, null);
+  const restoredNoBaseline = preserveSameTagMergedNotices([], replaceNoBaseline, plan.tag);
+  assert.equal(restoredNoBaseline.length, 1);
+  const replacedNoBaselineReport = buildReport({
+    plan,
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: restoredNoBaseline,
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  assert.deepEqual(patchChangeLines(replacedNoBaselineReport, replaceNoBaseline), [
+    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+  ]);
+});
+
+test("releaseNotes inserts a blank line before bullets when upstream summary has no bullet list", () => {
+  const noBullets = `**v0.1.12-nightly.20261122.5072** · 5 changes from 2 contributors
+
+### Plus 5 more bug fixes and performance improvements.
+
+<details>
+<summary>Full changelog</summary>
+
+## What's Changed
+* fix(server): something
+</details>`;
+  const plan = { needed: true, tag: "v0.1.12-nightly.20261122.5072", version: "0.1.12-nightly.20261122.5072", latest: true };
+  const prev = buildReport({
+    plan: { ...plan, tag: "v0.1.12-nightly.20261122.5071", version: "0.1.12-nightly.20261122.5071" },
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: [],
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  const current = buildReport({
+    plan,
+    apply: {
+      applied: [{ id: "1456-notice-hold", parts: ["server"], sha256: "aaaaaaaaaaaa", title: "Child end notice hold", summary: "Groups child end notices." }],
+      skipped: [],
+      server: true,
+      mobile: false,
+    },
+    notices: [],
+    server: "built",
+    android: "not-needed",
+    desktop: "built",
+  });
+  const notes = releaseNotes(current, { upstreamNotes: noBullets, previousReport: prev });
   assert.ok(
     notes.includes(
-      "- **Full file names.** Hover over truncated names in the Files tree.\n" +
-        "- **Store patches updated.** Added pr-39799, updated 1456-notice-hold, dropped pr-25165, pr-99999, left out pr-36186, desktop build failed.\n\n" +
-        "### Plus 24 more bug fixes and performance improvements.",
+      "**v0.1.12-nightly.20261122.5072** · 5 changes from 2 contributors\n\n" +
+        "- **Child end notice hold.** Groups child end notices.\n\n" +
+        "### Plus 5 more bug fixes and performance improvements.",
     ),
   );
 });

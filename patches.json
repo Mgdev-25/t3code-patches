@@ -5,31 +5,41 @@
       "pr": 25165,
       "head": "730a333a47ea0cbde7fe9bcf4ec525f8303ac542",
       "bug": 1410,
-      "file": "patches/upstream/pr-25165.patch"
+      "file": "patches/upstream/pr-25165.patch",
+      "title": "Muse Code usage limits",
+      "summary": "Shows Muse Code subscription usage in Usage and Limits."
     },
     {
       "pr": 36186,
       "head": "ac701d674ae393df510e68220291efc89fffcb6f",
       "bug": 1409,
-      "file": "patches/upstream/pr-36186.patch"
+      "file": "patches/upstream/pr-36186.patch",
+      "title": "Remote dictation language",
+      "summary": "Sends the selected language for remote phone dictation."
     },
     {
       "pr": 39799,
       "head": "da4e902702f1b6e874440b7dcc0cf812518e2354",
       "bug": 1578,
-      "file": "patches/upstream/pr-39799.patch"
+      "file": "patches/upstream/pr-39799.patch",
+      "title": "Antigravity message queue",
+      "summary": "Queues messages sent while an Antigravity question waits instead of breaking the turn."
     },
     {
       "pr": 40244,
       "head": "2e9755ca7c5d7c492c6041d1690d84525ec1e002",
       "bug": 18,
-      "file": "patches/upstream/pr-40244.patch"
+      "file": "patches/upstream/pr-40244.patch",
+      "title": "Antigravity quota auto-resume",
+      "summary": "Reads Antigravity quota reset times so rate-limited threads resume automatically."
     },
     {
       "pr": 37119,
       "head": "407e45bde96712bb5e511f6848cc79eea3f5daf2",
       "bug": 18,
-      "file": "patches/upstream/pr-37119.patch"
+      "file": "patches/upstream/pr-37119.patch",
+      "title": "Antigravity question forms",
+      "summary": "Asks each Antigravity ask_question choice once with its free-form answer."
     }
   ],
   "own": [
@@ -37,6 +47,8 @@
       "id": "1407-notice-link",
       "bug": 1407,
       "file": "patches/own/1407-notice-link.patch",
+      "title": "Phone notification deep link",
+      "summary": "Opens the chat of a tapped notification after the phone app was closed.",
       "check": "Kill the app from Recents, tap a T3 notice: the app opens the chat of the notice, not the last chat. Steps: own-patches/1407-notice-link/report.md of Shell issue 1411.",
       "dropWhen": "The upstream MainActivity of the tag already calls setIntent(intent) in onNewIntent."
     },
@@ -44,6 +56,8 @@
       "id": "1409-server-voice-settings",
       "bug": 1409,
       "file": "patches/own/1409-server-voice-settings.patch",
+      "title": "Phone dictation server settings",
+      "summary": "Uses server dictionary words and cleanup for phone dictation and keeps recording through usage refreshes.",
       "check": "With a Project dictionary alias and a cleanup model on the server, phone dictation inserts the dictionary term and cleaned text. A recording keeps going through the usage refresh of the server (Shell issue 1453). Steps: own-patches/1409-server-voice-settings/report.md of Shell issue 1411.",
       "dropWhen": "Upstream phone voice input sends speechProjectCustomWords and calls postProcess for an environment destination."
     },
@@ -51,6 +65,8 @@
       "id": "1448-form-free-text-mic",
       "bug": 1448,
       "file": "patches/own/1448-form-free-text-mic.patch",
+      "title": "Question form mic button",
+      "summary": "Shows the mic button and recording bar inside free-text question form boxes on mobile.",
       "check": "A T3 question form with a free-text answer shows the composer mic button inside the answer box, and the recording bar takes its place inside the box during dictation. A dictated answer lands in the field with the dictionary word and cleanup of the composer. The one feature in this list: Morgan allowed it on 2026-11-16 in Shell issue 1448.",
       "dropWhen": "The upstream QuestionAttachments of the tag already calls useVoiceInputController for the free-text answer."
     },
@@ -58,6 +74,8 @@
       "id": "1456-notice-hold",
       "bug": 1456,
       "file": "patches/own/1456-notice-hold.patch",
+      "title": "Child end notice hold",
+      "summary": "Groups delegated child end notices for an idle parent up to 120 seconds.",
       "check": "Start two delegated children, then let the parent finish its turn. End one child, then end the other 30 seconds later. The parent gets one notice with both task IDs. With only one child, its notice arrives at once. With another child still running, the first notice arrives after 120 seconds. Restart the server during the hold: it still delivers the notice by the original deadline, or at startup if that deadline passed. With A from parent run R1 and B and C from R2, end A, then end B 30 seconds later while C still runs. A and B notices arrive together at B's end, with no later deadline notice.",
       "dropWhen": "Upstream groups child end notices for idle parents with a hold of at most 120 seconds and restores held notices after a server restart without a database migration."
     },
@@ -65,6 +83,8 @@
       "id": "1467-form-draft-save",
       "bug": 1467,
       "file": "patches/own/1467-form-draft-save.patch",
+      "title": "Question form draft save",
+      "summary": "Saves unsent question form answers on mobile so they survive an app restart.",
       "check": "Unsent answers of a T3 question form survive an app restart: choose an option and type text without sending, switch apps, force-close the app, open it again, and the form shows the same option and text. The answers are saved in user-input-drafts/drafts.json in the app documents folder. Builds on 1448-form-free-text-mic, which also changes QuestionAttachments.",
       "dropWhen": "Upstream apps/mobile saves question form answers to disk, so userInputDraftsByRequestKeyAtom (or what replaced it) is loaded from a file at app start."
     },
@@ -72,6 +92,8 @@
       "id": "1472-codex-credits",
       "bug": 1472,
       "file": "patches/own/1472-codex-credits.patch",
+      "title": "Voice cleanup Codex credits",
+      "summary": "Keeps Codex Terra for voice cleanup while Codex credits remain.",
       "check": "With the Codex week window at 100 % and has_credits true, a voice cleanup on the server runs on the Codex cleanup model (Terra), not on the Claude fallback, and the Settings usage bar still shows 100 %. With no credits, T3 falls back as before. From Shell issue 1210.",
       "dropWhen": "The upstream exhaustedUsageWindow of the tag lets Codex credits (hasCredits or unlimited) keep a full Codex plan window from blocking."
     },
@@ -79,6 +101,8 @@
       "id": "1473-server-cleanup-prompt",
       "bug": 1473,
       "file": "patches/own/1473-server-cleanup-prompt.patch",
+      "title": "Shared server cleanup prompt",
+      "summary": "Uses voice-cleanup-prompt.txt on the server for Built-in voice cleanup.",
       "check": "Put a prompt in voice-cleanup-prompt.txt in the server userdata folder. A phone dictation and a desktop dictation with Instructions on Built-in get the same cleanup from that prompt. With the file empty or gone, both use the built-in prompt. A desktop Custom prompt still wins. From Shell issue 1210.",
       "dropWhen": "Upstream lets the server replace the built-in voice cleanup prompt for every client, or the phone sends the desktop custom prompt."
     },
@@ -86,6 +110,8 @@
       "id": "1474-cleanup-fallback-model",
       "bug": 1474,
       "file": "patches/own/1474-cleanup-fallback-model.patch",
+      "title": "Voice cleanup fallback model",
+      "summary": "Adds a Fallback cleanup model row under Settings, Voice, Cleanup.",
       "check": "Settings > Voice > Cleanup shows a Fallback cleanup model row under Cleanup model, and it saves the model. When the cleanup model is out of usage (for Codex: also no credits) or cannot run, cleanup runs on the fallback model when it can run, else on T3's own fallback. Morgan's feature exception of 2026-11-17 in Shell issue 1210. Builds on 1472-codex-credits.",
       "dropWhen": "Upstream server settings have a fallback model for voice transcript cleanup."
     }

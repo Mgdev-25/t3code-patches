@@ -32,12 +32,16 @@ export interface UpstreamEntry {
   readonly head: string;
   readonly bug: number;
   readonly file: string;
+  readonly title: string;
+  readonly summary: string;
 }
 
 export interface OwnEntry {
   readonly id: string;
   readonly bug: number;
   readonly file: string;
+  readonly title: string;
+  readonly summary: string;
   readonly check: string;
   readonly dropWhen: string;
 }
@@ -55,11 +59,16 @@ export interface Applied {
   readonly parts: ReadonlyArray<Part>;
   /** First 12 hex chars of the patch file's SHA-256, so release notes spot rebased patches. */
   readonly sha256?: string;
+  readonly title?: string;
+  readonly summary?: string;
 }
 
 export interface Skipped {
   readonly id: string;
   readonly reason: string;
+  readonly parts?: ReadonlyArray<Part>;
+  readonly title?: string;
+  readonly summary?: string;
 }
 
 export interface ApplyResult {
@@ -89,9 +98,22 @@ export interface PrState {
 }
 
 export type Notice =
-  | { readonly kind: "merged"; readonly pr: number; readonly tag: string }
+  | {
+      readonly kind: "merged";
+      readonly pr: number;
+      readonly tag: string;
+      readonly title?: string;
+      readonly parts?: ReadonlyArray<Part>;
+    }
   | { readonly kind: "new-head"; readonly pr: number; readonly head: string }
-  | { readonly kind: "closed"; readonly pr: number };
+  | {
+      readonly kind: "closed";
+      readonly pr: number;
+      readonly title?: string;
+      readonly parts?: ReadonlyArray<Part>;
+    };
+
+export type MergedNotice = Extract<Notice, { readonly kind: "merged" }>;
 
 /** The id of a list entry, as the report and the --skip input name it. */
 export const entryId = (entry: UpstreamEntry | OwnEntry): string =>
@@ -118,6 +140,17 @@ export function validateList(list: PatchList): ReadonlyArray<string> {
   for (const entry of list.own) {
     if (!entry.check.trim() || !entry.dropWhen.trim()) {
       errors.push(`${entry.id} needs a check and a dropWhen line`);
+    }
+  }
+  for (const entry of applyOrder(list)) {
+    const id = entryId(entry);
+    const title = typeof entry.title === "string" ? entry.title.trim() : "";
+    const summary = typeof entry.summary === "string" ? entry.summary.trim() : "";
+    if (!title || !summary) {
+      errors.push(`${id} needs a title and a summary`);
+    } else {
+      if (/[*\r\n]/.test(title)) errors.push(`${id} title cannot contain '*' or newlines`);
+      if (/[\r\n]/.test(summary)) errors.push(`${id} summary must be a single line`);
     }
   }
   return errors;
@@ -205,19 +238,34 @@ export function syncEntries(input: {
   readonly states: ReadonlyMap<number, PrState>;
   readonly inTag: (mergeCommit: string) => boolean;
   readonly tag: string;
+  readonly partsOfEntry?: (entry: UpstreamEntry) => ReadonlyArray<Part> | undefined;
 }): { readonly keep: ReadonlyArray<UpstreamEntry>; readonly notices: ReadonlyArray<Notice> } {
   const keep: UpstreamEntry[] = [];
   const notices: Notice[] = [];
   for (const entry of input.entries) {
     const state = input.states.get(entry.pr);
     if (state === undefined) throw new Error(`no state for PR ${entry.pr}`);
+    const title = entry.title.trim();
+    const parts = input.partsOfEntry?.(entry);
     if (state.state === "MERGED" && state.mergeCommit !== null && input.inTag(state.mergeCommit)) {
-      notices.push({ kind: "merged", pr: entry.pr, tag: input.tag });
+      notices.push({
+        kind: "merged",
+        pr: entry.pr,
+        tag: input.tag,
+        ...(title ? { title } : {}),
+        ...(parts !== undefined ? { parts } : {}),
+      });
       continue;
     }
     keep.push(entry);
-    if (state.state === "CLOSED") notices.push({ kind: "closed", pr: entry.pr });
-    else if (state.state === "OPEN" && state.headRefOid !== entry.head) {
+    if (state.state === "CLOSED") {
+      notices.push({
+        kind: "closed",
+        pr: entry.pr,
+        ...(title ? { title } : {}),
+        ...(parts !== undefined ? { parts } : {}),
+      });
+    } else if (state.state === "OPEN" && state.headRefOid !== entry.head) {
       notices.push({ kind: "new-head", pr: entry.pr, head: state.headRefOid });
     }
   }
@@ -362,6 +410,12 @@ export interface Report {
   readonly needsRepair: boolean;
 }
 
+/** Prior healthy desktop baseline plus merged notices carried across failed or replaced runs. */
+export interface PreviousContext {
+  readonly baseline: Report | null;
+  readonly carriedMergedNotices: ReadonlyArray<MergedNotice>;
+}
+
 export function buildReport(input: {
   readonly plan: Plan;
   readonly apply: ApplyResult;
@@ -390,69 +444,293 @@ export function buildReport(input: {
   };
 }
 
-/** The newest store nightly strictly older than `tag` that holds PATCHES.json, or undefined. */
-export function previousReportTag(releases: ReadonlyArray<ReleaseAssets>, tag: string): string | undefined {
+/** Store nightlies strictly older than `tag` that hold PATCHES.json, newest first. */
+export function previousReportTags(releases: ReadonlyArray<ReleaseAssets>, tag: string): ReadonlyArray<string> {
   return releases
     .filter((release) => NIGHTLY_TAG.test(release.tagName) && compareNightly(release.tagName, tag) < 0)
     .filter((release) => release.assets.includes("PATCHES.json"))
-    .sort((a, b) => compareNightly(b.tagName, a.tagName))[0]?.tagName;
+    .sort((a, b) => compareNightly(b.tagName, a.tagName))
+    .map((release) => release.tagName);
+}
+
+/** True when a release shipped a non-failed server build (or clean upstream copy). */
+export const isPublishedServerBaseline = (report: Report): boolean => report.server !== "failed";
+
+/**
+ * Picks the newest prior report whose server build did not fail as the baseline and carries
+ * forward any `merged` notices from a same-tag release being replaced and from failed releases
+ * skipped along the way, even when no older healthy baseline exists.
+ */
+export function selectPreviousBaseline(
+  reports: ReadonlyArray<Report>,
+  sameTagReport?: Report | null,
+): PreviousContext {
+  const carried: MergedNotice[] = [];
+  const collectMerged = (report: Report) => {
+    for (const notice of report.notices) {
+      if (notice.kind === "merged") carried.push(notice);
+    }
+  };
+  if (sameTagReport !== null && sameTagReport !== undefined) {
+    collectMerged(sameTagReport);
+  }
+  let baseline: Report | null = null;
+  for (const report of reports) {
+    if (isPublishedServerBaseline(report)) {
+      baseline = report;
+      break;
+    }
+    collectMerged(report);
+  }
+  const seen = new Set<number>();
+  const carriedMergedNotices = carried.filter((notice) => {
+    if (seen.has(notice.pr)) return false;
+    seen.add(notice.pr);
+    return true;
+  });
+  return { baseline, carriedMergedNotices };
+}
+
+function normalizePrevious(previous?: Report | PreviousContext | null): PreviousContext {
+  if (previous === null || previous === undefined) {
+    return { baseline: null, carriedMergedNotices: [] };
+  }
+  if ("baseline" in previous) {
+    return {
+      baseline:
+        previous.baseline !== null && isPublishedServerBaseline(previous.baseline)
+          ? previous.baseline
+          : null,
+      carriedMergedNotices: previous.carriedMergedNotices,
+    };
+  }
+  return {
+    baseline: isPublishedServerBaseline(previous) ? previous : null,
+    carriedMergedNotices: [],
+  };
+}
+
+/** Keeps merged notices recorded for `tag` on an earlier run when a `replace` run republishes `tag`. */
+export function preserveSameTagMergedNotices(
+  notices: ReadonlyArray<Notice>,
+  previous: Report | PreviousContext | null | undefined,
+  tag: string,
+): ReadonlyArray<Notice> {
+  const existing = new Set(
+    notices.filter((notice) => notice.kind === "merged").map((notice) => notice.pr),
+  );
+  const restored = normalizePrevious(previous).carriedMergedNotices.filter(
+    (notice) => notice.tag === tag && !existing.has(notice.pr),
+  );
+  return restored.length > 0 ? [...notices, ...restored] : notices;
 }
 
 const FULL_CHANGELOG_MARKER = /<details>\s*<summary>\s*Full changelog\s*<\/summary>/i;
 
+interface PatchMeta {
+  readonly parts?: ReadonlyArray<Part> | undefined;
+  readonly title?: string | undefined;
+}
+
+const hasServerPart = (parts?: ReadonlyArray<Part>): boolean =>
+  parts !== undefined && parts.includes("server");
+
+const ensurePeriod = (text: string): string => {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+};
+
+function formatPatchBullet(title: string, body: string): string {
+  const cleanTitle = title.trim().replace(/\.+$/, "").replace(/\*/g, "");
+  return `- **${cleanTitle}.** ${ensurePeriod(body)}`;
+}
+
+function mergeMeta(...sources: ReadonlyArray<PatchMeta | undefined>): PatchMeta {
+  return {
+    parts: sources.find((source) => source?.parts !== undefined)?.parts,
+    title: sources.find((source) => source?.title?.trim())?.title,
+  };
+}
+
 /**
- * One bullet in upstream T3 Code's release note style when patches changed compared to the
- * previous store release, a patch was left out, a PR closed, or a build failed. Null when clean
- * and unchanged so the update notice stays pure upstream T3 Code notes.
+ * Upstream-style `- **Title.** Description.` bullets for server and desktop patches that changed
+ * compared to the previous published store build, were left out, newly closed upstream, or failed
+ * to build. Mobile-only patches stay in PATCHES.json and the collapsed Store patches block. Empty
+ * when clean and unchanged so the desktop update notice stays pure upstream T3 Code notes.
  */
-export function patchChangeLine(report: Report, previous?: Report | null): string | null {
-  const clauses: string[] = [];
-  const merged = new Set(
-    report.notices.filter((notice) => notice.kind === "merged").map((notice) => `pr-${notice.pr}`),
-  );
-  if (previous !== null && previous !== undefined) {
-    const prevApplied = new Map(previous.applied.map((item) => [item.id, item.sha256] as const));
-    const added = report.applied.filter((item) => !prevApplied.has(item.id)).map((item) => item.id);
-    const updated = report.applied
-      .filter((item) => {
-        const prevHash = prevApplied.get(item.id);
-        return prevHash !== undefined && item.sha256 !== undefined && prevHash !== item.sha256;
-      })
-      .map((item) => item.id);
-    const currentApplied = new Set(report.applied.map((item) => item.id));
-    const skippedIds = new Set(report.skipped.map((item) => item.id));
-    const prevIds = [
-      ...previous.applied.map((item) => item.id),
-      ...previous.skipped.map((item) => item.id),
+export function patchChangeLines(
+  report: Report,
+  previous?: Report | PreviousContext | null,
+): ReadonlyArray<string> {
+  if (report.server === "failed") {
+    const label = report.desktop === "failed" ? "Server and desktop" : "Server";
+    return [
+      formatPatchBullet(
+        "Store build failed",
+        `${label} build failed, check the release details.`,
+      ),
     ];
-    const dropped = [
+  }
+
+  const { baseline, carriedMergedNotices } = normalizePrevious(previous);
+
+  const bullets: string[] = [];
+  const currentMeta = new Map<string, PatchMeta>();
+  for (const item of report.applied) currentMeta.set(item.id, item);
+  for (const item of report.skipped) currentMeta.set(item.id, item);
+
+  const prevMeta = new Map<string, PatchMeta>();
+  if (baseline !== null) {
+    for (const item of baseline.applied) prevMeta.set(item.id, item);
+    for (const item of baseline.skipped) prevMeta.set(item.id, item);
+  }
+
+  const noticeMeta = new Map<string, PatchMeta>();
+  for (const notice of carriedMergedNotices) {
+    noticeMeta.set(`pr-${notice.pr}`, { parts: notice.parts, title: notice.title });
+  }
+  for (const notice of report.notices) {
+    if (notice.kind === "merged" || notice.kind === "closed") {
+      noticeMeta.set(`pr-${notice.pr}`, { parts: notice.parts, title: notice.title });
+    }
+  }
+
+  const labelOf = (id: string, meta?: PatchMeta): string => meta?.title?.trim() || id;
+  const merged = new Set([
+    ...report.notices.filter((notice) => notice.kind === "merged").map((notice) => `pr-${notice.pr}`),
+    ...carriedMergedNotices.map((notice) => `pr-${notice.pr}`),
+  ]);
+  const prevSkipped = new Set((baseline?.skipped ?? []).map((item) => item.id));
+  const prevClosed = new Set(
+    (baseline?.notices ?? [])
+      .filter((notice) => notice.kind === "closed")
+      .map((notice) => `pr-${notice.pr}`),
+  );
+  const newlyClosed = new Set(
+    report.notices
+      .filter((notice) => notice.kind === "closed")
+      .map((notice) => `pr-${notice.pr}`)
+      .filter((id) => !prevClosed.has(id)),
+  );
+  const handledClosed = new Set<string>();
+
+  if (baseline !== null) {
+    const prevApplied = new Map(baseline.applied.map((item) => [item.id, item] as const));
+    for (const item of report.applied) {
+      if (!item.parts.includes("server")) continue;
+      const prev = prevApplied.get(item.id);
+      const closed = newlyClosed.has(item.id);
+      if (prev === undefined) {
+        const base = ensurePeriod(item.summary?.trim() || "Included in this store build.");
+        if (closed) {
+          handledClosed.add(item.id);
+          bullets.push(
+            formatPatchBullet(
+              `${labelOf(item.id, item)} (closed upstream)`,
+              `${base} Upstream PR closed without merge, review needed.`,
+            ),
+          );
+        } else {
+          bullets.push(formatPatchBullet(labelOf(item.id, item), base));
+        }
+      } else if (prev.sha256 !== undefined && item.sha256 !== undefined && prev.sha256 !== item.sha256) {
+        const base = ensurePeriod(item.summary?.trim() || "Updated for this nightly.");
+        if (closed) {
+          handledClosed.add(item.id);
+          bullets.push(
+            formatPatchBullet(
+              `${labelOf(item.id, item)} (updated, closed upstream)`,
+              `${base} Upstream PR closed without merge, review needed.`,
+            ),
+          );
+        } else {
+          bullets.push(formatPatchBullet(`${labelOf(item.id, item)} (updated)`, base));
+        }
+      }
+    }
+    const currentIds = new Set([
+      ...report.applied.map((item) => item.id),
+      ...report.skipped.map((item) => item.id),
+    ]);
+    const prevIds = [
       ...new Set([
-        ...prevIds.filter((id) => !currentApplied.has(id) && !skippedIds.has(id)),
+        ...baseline.applied.map((item) => item.id),
+        ...baseline.skipped.map((item) => item.id),
         ...merged,
       ]),
     ];
-    if (added.length > 0) clauses.push(`added ${added.join(", ")}`);
-    if (updated.length > 0) clauses.push(`updated ${updated.join(", ")}`);
-    if (dropped.length > 0) clauses.push(`dropped ${dropped.join(", ")}`);
-  } else if (merged.size > 0) {
-    clauses.push(`dropped ${[...merged].join(", ")}`);
+    for (const id of prevIds) {
+      if (currentIds.has(id)) continue;
+      const meta = mergeMeta(noticeMeta.get(id), prevMeta.get(id));
+      if (!hasServerPart(meta.parts)) continue;
+      if (merged.has(id)) {
+        bullets.push(
+          formatPatchBullet(
+            `${labelOf(id, meta)} (merged upstream)`,
+            "Included in upstream T3 Code, store patch dropped.",
+          ),
+        );
+      } else {
+        bullets.push(
+          formatPatchBullet(`${labelOf(id, meta)} (dropped)`, "Removed from the store patch list."),
+        );
+      }
+    }
+  } else {
+    for (const id of merged) {
+      const meta = noticeMeta.get(id);
+      if (!hasServerPart(meta?.parts)) continue;
+      bullets.push(
+        formatPatchBullet(
+          `${labelOf(id, meta)} (merged upstream)`,
+          "Included in upstream T3 Code, store patch dropped.",
+        ),
+      );
+    }
   }
-  if (report.skipped.length > 0) {
-    clauses.push(`left out ${report.skipped.map((item) => item.id).join(", ")}`);
+
+  for (const item of report.skipped) {
+    if (!hasServerPart(item.parts)) continue;
+    const closed = newlyClosed.has(item.id);
+    if (prevSkipped.has(item.id) && !closed) continue;
+    const detail = item.summary?.trim();
+    if (closed) {
+      handledClosed.add(item.id);
+      bullets.push(
+        formatPatchBullet(
+          `${labelOf(item.id, item)} (left out, closed upstream)`,
+          "Not included in this build. Upstream PR closed without merge, review needed.",
+        ),
+      );
+    } else {
+      bullets.push(
+        formatPatchBullet(
+          `${labelOf(item.id, item)} (left out)`,
+          detail ? `Not included in this build. ${ensurePeriod(detail)}` : "Not included in this build.",
+        ),
+      );
+    }
   }
-  const closed = report.notices
-    .filter((notice) => notice.kind === "closed")
-    .map((notice) => `pr-${notice.pr}`);
-  if (closed.length > 0) clauses.push(`closed upstream ${closed.join(", ")}`);
-  const failed = [
-    ...(report.server === "failed" ? ["server"] : []),
-    ...(report.desktop === "failed" ? ["desktop"] : []),
-    ...(report.android === "failed" ? ["android"] : []),
-  ];
-  if (failed.length > 0) clauses.push(`${failed.join(", ")} build failed`);
-  if (clauses.length === 0) return null;
-  const text = clauses.join(", ");
-  return `- **Store patches updated.** ${text[0]!.toUpperCase()}${text.slice(1)}.`;
+
+  for (const id of newlyClosed) {
+    if (handledClosed.has(id)) continue;
+    const meta = mergeMeta(currentMeta.get(id), noticeMeta.get(id), prevMeta.get(id));
+    if (!hasServerPart(meta.parts)) continue;
+    bullets.push(
+      formatPatchBullet(
+        `${labelOf(id, meta)} (closed upstream)`,
+        "Upstream PR closed without merge, review needed.",
+      ),
+    );
+  }
+
+  if (report.desktop === "failed") {
+    bullets.push(
+      formatPatchBullet("Store build failed", "Desktop build failed, check the release details."),
+    );
+  }
+
+  return bullets;
 }
 
 function storeSummary(report: Report): string {
@@ -479,31 +757,36 @@ function storeSummary(report: Report): string {
   ].join("\n");
 }
 
-function insertSummaryBullet(upstreamNotes: string, bullet: string): string {
+function insertSummaryBullets(upstreamNotes: string, bullets: ReadonlyArray<string>): string {
+  const block = bullets.join("\n");
   const detailsIdx = upstreamNotes.search(FULL_CHANGELOG_MARKER);
   const head = detailsIdx >= 0 ? upstreamNotes.slice(0, detailsIdx) : upstreamNotes;
   const tail = detailsIdx >= 0 ? upstreamNotes.slice(detailsIdx) : "";
   const plusMatch = /\n+### Plus \d+ more /m.exec(head);
   if (plusMatch !== null) {
-    return `${head.slice(0, plusMatch.index)}\n${bullet}${head.slice(plusMatch.index)}${tail}`;
+    const before = head.slice(0, plusMatch.index);
+    const sep = /(?:^|\n)[-*]\s+[^\n]*$/.test(before) ? "\n" : "\n\n";
+    return `${before}${sep}${block}${head.slice(plusMatch.index)}${tail}`;
   }
+  const before = head.trimEnd();
+  const sep = /(?:^|\n)[-*]\s+[^\n]*$/.test(before) ? "\n" : "\n\n";
   if (detailsIdx >= 0) {
-    return `${head.trimEnd()}\n${bullet}\n\n${tail}`;
+    return `${before}${sep}${block}\n\n${tail}`;
   }
-  return `${head.trimEnd()}\n${bullet}`;
+  return `${before}${sep}${block}`;
 }
 
 export function releaseNotes(
   report: Report,
   options?: {
     readonly upstreamNotes?: string | undefined;
-    readonly previousReport?: Report | null | undefined;
+    readonly previousReport?: Report | PreviousContext | null | undefined;
   },
 ): string {
   const upstream = options?.upstreamNotes?.trim();
   if (!upstream) return storeSummary(report);
-  const bullet = patchChangeLine(report, options?.previousReport);
-  const body = bullet === null ? upstream : insertSummaryBullet(upstream, bullet);
+  const bullets = patchChangeLines(report, options?.previousReport);
+  const body = bullets.length === 0 ? upstream : insertSummaryBullets(upstream, bullets);
   // T3 Desktop parses only text before `<details><summary>Full changelog</summary>`, so a second
   // collapsed block after it keeps full patch status on GitHub without polluting the update popup.
   if (FULL_CHANGELOG_MARKER.test(body)) {
@@ -611,24 +894,27 @@ function applyList(src: string, skip: ReadonlySet<string>): ApplyResult {
   const skipped: Skipped[] = [];
   for (const entry of applyOrder(list)) {
     const id = entryId(entry);
+    const patchFile = join(process.cwd(), entry.file);
+    const meta = { title: entry.title.trim(), summary: entry.summary.trim() };
     if (skip.has(id) || skip.has("all")) {
-      skipped.push({ id, reason: "left out by the run input" });
+      const parts = existsSync(patchFile) ? partsOf(patchPaths(readFileSync(patchFile, "utf8"))) : undefined;
+      skipped.push({ id, reason: "left out by the run input", ...(parts !== undefined ? { parts } : {}), ...meta });
       continue;
     }
-    const patchFile = join(process.cwd(), entry.file);
     const content = readFileSync(patchFile, "utf8");
     const paths = patchPaths(content);
+    const parts = partsOf(paths);
     const refusal = refusalOf(paths);
     if (refusal !== undefined) {
-      skipped.push({ id, reason: refusal });
+      skipped.push({ id, reason: refusal, parts, ...meta });
       continue;
     }
     const result = tryRun("git", ["apply", "--whitespace=nowarn", patchFile], src);
     if (result.ok) {
       const sha256 = createHash("sha256").update(content).digest("hex").slice(0, 12);
-      applied.push({ id, parts: partsOf(paths), sha256 });
+      applied.push({ id, parts, sha256, ...meta });
     } else {
-      skipped.push({ id, reason: `does not apply: ${result.out}` });
+      skipped.push({ id, reason: `does not apply: ${result.out}`, parts, ...meta });
     }
   }
   return {
@@ -695,6 +981,8 @@ function main(argv: ReadonlyArray<string>) {
         states,
         inTag: (commit) => tagHolds(tag, commit),
         tag,
+        partsOfEntry: (entry) =>
+          existsSync(entry.file) ? partsOf(patchPaths(readFileSync(entry.file, "utf8"))) : undefined,
       });
       for (const entry of list.upstream) {
         if (!keep.includes(entry) && existsSync(entry.file)) unlinkSync(entry.file);
@@ -748,26 +1036,64 @@ function main(argv: ReadonlyArray<string>) {
       const repo = storeRepo();
       const tag = required(args, "--tag");
       const out = required(args, "--out");
-      const prevTag = previousReportTag(listReleaseAssets(repo), tag) ?? null;
-      if (prevTag !== null) {
+      const releases = listReleaseAssets(repo);
+      const downloadReport = (releaseTag: string): Report => {
         const tmp = `${out}.tmp`;
         try {
-          run("gh", ["release", "download", prevTag, "--repo", repo, "--pattern", "PATCHES.json", "--output", tmp, "--clobber"]);
-          readJson<Report>(tmp);
+          run("gh", ["release", "download", releaseTag, "--repo", repo, "--pattern", "PATCHES.json", "--output", tmp, "--clobber"]);
+          const parsed = readJson<Report>(tmp);
+          unlinkSync(tmp);
+          return parsed;
+        } catch (error) {
+          if (existsSync(tmp)) unlinkSync(tmp);
+          throw error;
+        }
+      };
+      const hasSameTag = releases.some(
+        (release) => release.tagName === tag && release.assets.includes("PATCHES.json"),
+      );
+      const sameTagReport = hasSameTag ? downloadReport(tag) : null;
+      const candidates = previousReportTags(releases, tag);
+      const visited: Report[] = [];
+      let chosen: string | null = null;
+      let context = selectPreviousBaseline(visited, sameTagReport);
+      for (const prevTag of candidates) {
+        visited.push(downloadReport(prevTag));
+        context = selectPreviousBaseline(visited, sameTagReport);
+        if (context.baseline !== null) {
+          chosen = prevTag;
+          break;
+        }
+      }
+      if (context.baseline !== null || context.carriedMergedNotices.length > 0) {
+        const tmp = `${out}.tmp`;
+        try {
+          writeJson(tmp, context);
           renameSync(tmp, out);
         } catch (error) {
           if (existsSync(tmp)) unlinkSync(tmp);
           throw error;
         }
       }
-      console.log(JSON.stringify({ from: prevTag }));
+      console.log(JSON.stringify({ from: chosen }));
       return;
     }
     case "report": {
+      const plan = readJson<Plan>(required(args, "--plan"));
+      const prevReportFile = argValue(args, "--prev-report");
+      let previousReport: Report | PreviousContext | null = null;
+      if (prevReportFile && existsSync(prevReportFile) && statSync(prevReportFile).size > 0) {
+        previousReport = readJson<Report | PreviousContext>(prevReportFile);
+      }
+      const notices = preserveSameTagMergedNotices(
+        readJson<ReadonlyArray<Notice>>(required(args, "--notices")),
+        previousReport,
+        plan.tag,
+      );
       const report = buildReport({
-        plan: readJson<Plan>(required(args, "--plan")),
+        plan,
         apply: readJson<ApplyResult>(required(args, "--apply")),
-        notices: readJson<ReadonlyArray<Notice>>(required(args, "--notices")),
+        notices,
         server: required(args, "--server") as BuildState,
         android: required(args, "--android") as BuildState,
         desktop: required(args, "--desktop") as BuildState,
@@ -776,11 +1102,6 @@ function main(argv: ReadonlyArray<string>) {
       const upstreamNotesFile = argValue(args, "--upstream-notes");
       const upstreamNotes =
         upstreamNotesFile && existsSync(upstreamNotesFile) ? readFileSync(upstreamNotesFile, "utf8") : undefined;
-      const prevReportFile = argValue(args, "--prev-report");
-      let previousReport: Report | null = null;
-      if (prevReportFile && existsSync(prevReportFile) && statSync(prevReportFile).size > 0) {
-        previousReport = readJson<Report>(prevReportFile);
-      }
       const out = required(args, "--out");
       writeJson(join(out, "PATCHES.json"), report);
       writeFileSync(join(out, "notes.md"), `${releaseNotes(report, { upstreamNotes, previousReport })}\n`);
