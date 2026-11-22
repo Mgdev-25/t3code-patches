@@ -337,18 +337,18 @@ index 441c9992e7..127e6a8972 100644
              while (
                wake.threadId !== parentThreadId ||
 diff --git a/apps/server/src/orchestration-v2/Orchestrator.ts b/apps/server/src/orchestration-v2/Orchestrator.ts
-index 00939843c1..2327d558ba 100644
+index bcbe8a3656..d8f85b9d4f 100644
 --- a/apps/server/src/orchestration-v2/Orchestrator.ts
 +++ b/apps/server/src/orchestration-v2/Orchestrator.ts
-@@ -103,6 +103,7 @@ import * as DateTime from "effect/DateTime";
- import * as Effect from "effect/Effect";
+@@ -106,6 +106,7 @@ import * as Effect from "effect/Effect";
  import * as Exit from "effect/Exit";
+ import * as FiberSet from "effect/FiberSet";
  import * as FileSystem from "effect/FileSystem";
 +import * as Fiber from "effect/Fiber";
  import * as Path from "effect/Path";
  import * as Layer from "effect/Layer";
  import * as Option from "effect/Option";
-@@ -179,6 +180,7 @@ import {
+@@ -184,6 +185,7 @@ import {
    threadShellFromProjection,
    ProjectionStoreV2,
    type ProjectionRecordField,
@@ -356,7 +356,7 @@ index 00939843c1..2327d558ba 100644
    type ProjectionTimelinePage,
    type ProjectionTimelinePageOptions,
    type ProjectionRecordFilter,
-@@ -1651,6 +1653,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -1664,6 +1666,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    const threadForkService = yield* ThreadForkServiceV2;
    const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
    const messageIntake = yield* KeyedLock.make<ThreadId>();
@@ -368,7 +368,7 @@ index 00939843c1..2327d558ba 100644
    // Read once: the policy is fixed for the server's life, and dispatch takes it as an input.
    const { managedPolicy } = serverSettings;
    const runtimeModeCeiling: RuntimeModeCeiling | undefined =
-@@ -2068,7 +2075,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -2081,7 +2088,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
  
    const offerDelegatedCompletionDelivery =
      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -381,7 +381,7 @@ index 00939843c1..2327d558ba 100644
        const controls = yield* projectionStore.getThreadRecords(threadId, ["runs"], {
          runIds: [parentRunId],
        });
-@@ -2100,6 +2111,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -2113,6 +2124,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
          if (!isUndeliveredMailboxSteer({ ...messages, ...runs, ...turns }, delivery.messageId))
            return;
        }
@@ -436,7 +436,7 @@ index 00939843c1..2327d558ba 100644
        const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"], {
          providerThreadIds: parentRun.providerThreadId === null ? [] : [parentRun.providerThreadId],
        });
-@@ -15242,8 +15301,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
+@@ -15316,8 +15375,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
        yield* writeSystemEvents(completionEvents, [], { updateDelegatedCompletionOnly: true });
        yield* releaseFinishedDelegateSessions(childThreadId, childRun.id, task.id);
  
