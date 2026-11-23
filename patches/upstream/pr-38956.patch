@@ -1,0 +1,887 @@
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+index be41f8630b..67cd3598e6 100644
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -1350,7 +1350,7 @@ export const layerOrchestratorToolkit = toolkitRegistration(
+ export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
+ const layerWorkflowToolkit = toolkitRegistration(WorkflowToolkit, WorkflowHandlers.layer);
+ 
+-const layerMessageToolkit = toolkitRegistration(MessageToolkit, MessageHandlers.layer);
++export const layerMessageToolkit = toolkitRegistration(MessageToolkit, MessageHandlers.layer);
+ 
+ const layerWorktreeToolkitRegistration = toolkitRegistration(
+   WorktreeToolkit,
+diff --git a/apps/server/src/mcp/toolkits/core.test.ts b/apps/server/src/mcp/toolkits/core.test.ts
+index 33c356af4e..2339051205 100644
+--- a/apps/server/src/mcp/toolkits/core.test.ts
++++ b/apps/server/src/mcp/toolkits/core.test.ts
+@@ -78,7 +78,7 @@ const declaredFailure = (result: McpSchema.CallToolResult) => {
+   const text = result.content[0];
+   return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
+ };
+-import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
++import { htmlRenderFromToolItem, sentMessageFromToolItem } from "@t3tools/shared/toolOutput";
+ 
+ const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
+ const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
+@@ -384,11 +384,30 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
+       expect(yield* byPath(name, scope), name).toContain("only full-access threads");
+       expect(yield* byPath(name, fullAccess), name).toContain("not a readable HTML document");
+     }
++    const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
++    const sent = yield* server
++      .callTool({
++        name: "send_to_user",
++        arguments: { message: "Draft:\n\n> Ready to merge." },
++      })
++      .pipe(
++        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
++        Effect.provideService(McpSchema.McpServerClient, client),
++      );
++    expect(
++      sentMessageFromToolItem({ toolName: "t3-code.send_to_user", output: sent.structuredContent }),
++    ).toBe("Draft:\n\n> Ready to merge.");
++    expect(
++      yield* mcpSessions.takeSentMessage(scope.thread!.threadId, "Draft:\n\n> Ready to merge."),
++    ).toBe("Draft:\n\n> Ready to merge.");
++    expect(
++      yield* mcpSessions.takeSentMessage(scope.thread!.threadId, "Draft:\n\n> Ready to merge."),
++    ).toBeUndefined();
+   }).pipe(
+     Effect.provide(
+-      McpHttpServer.layerHtmlToolkit.pipe(
++      Layer.mergeAll(McpHttpServer.layerHtmlToolkit, McpHttpServer.layerMessageToolkit).pipe(
+         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+-        Layer.provide(McpProviderSessions.layer),
++        Layer.provideMerge(McpProviderSessions.layer),
+         Layer.provide(PreviewBrowser.layer),
+         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-html-render-" })),
+         Layer.provide(
+diff --git a/apps/server/src/mcp/toolkits/message/handlers.ts b/apps/server/src/mcp/toolkits/message/handlers.ts
+index defe3609f0..e56c3d439f 100644
+--- a/apps/server/src/mcp/toolkits/message/handlers.ts
++++ b/apps/server/src/mcp/toolkits/message/handlers.ts
+@@ -1,13 +1,25 @@
++import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
++import { SEND_TO_USER_TOOL_NAME } from "@t3tools/shared/toolOutput";
+ import * as Effect from "effect/Effect";
+ 
++import * as McpInvocationContext from "../../McpInvocationContext.ts";
+ import * as McpToolAccess from "../../McpToolAccess.ts";
+ import { MessageToolkit } from "./tools.ts";
+ 
+ const handlers = {
+   send_to_user: McpToolAccess.actsAsCaller((input) =>
+-    Effect.succeed({
+-      sentMessage: input.message,
+-      message: "Shown to the user. Don't repeat it.",
++    Effect.gen(function* () {
++      const scope = yield* McpInvocationContext.McpInvocationContext;
++      const { thread } = yield* McpInvocationContext.requireThreadScope(
++        scope,
++        SEND_TO_USER_TOOL_NAME,
++      );
++      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
++      yield* mcpSessions.recordSentMessage(thread.threadId, input.message);
++      return {
++        sentMessage: input.message,
++        message: "Shown to the user. Don't repeat it.",
++      };
+     }),
+   ),
+ } satisfies McpToolAccess.Handlers<typeof MessageToolkit.tools>;
+diff --git a/apps/server/src/mcp/toolkits/message/tools.ts b/apps/server/src/mcp/toolkits/message/tools.ts
+index 418a252eb9..5e5fa971a3 100644
+--- a/apps/server/src/mcp/toolkits/message/tools.ts
++++ b/apps/server/src/mcp/toolkits/message/tools.ts
+@@ -1,4 +1,5 @@
+ import { OrchestratorMcpFailure } from "@t3tools/contracts";
++import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+ import { SEND_TO_USER_MAX_LENGTH, SEND_TO_USER_TOOL_NAME } from "@t3tools/shared/toolOutput";
+ import * as Schema from "effect/Schema";
+ import { McpSchema, Tool, Toolkit } from "effect/ai";
+@@ -25,6 +26,7 @@ const SendToUserTool = Tool.make(SEND_TO_USER_TOOL_NAME, {
+   failureMode: "return",
+   dependencies: [
+     McpInvocationContext.McpInvocationContext,
++    McpProviderSessions.McpProviderSessions,
+     ThreadManagementService.ThreadManagementService,
+   ],
+ })
+diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
+index 9981ad9b0d..2028d801fb 100644
+--- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
++++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
+@@ -15,7 +15,7 @@ import {
+   ThreadId,
+ } from "@t3tools/contracts";
+ import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+-import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
++import { htmlRenderFromToolItem, sentMessageFromToolItem } from "@t3tools/shared/toolOutput";
+ import * as SecureRandom from "effect/crypto/SecureRandom";
+ import * as DateTime from "effect/DateTime";
+ import * as Deferred from "effect/Deferred";
+@@ -692,8 +692,8 @@ describe("AntigravityAdapterV2 workspace changes", () => {
+   );
+ });
+ 
+-describe("AntigravityAdapterV2 html_render pages", () => {
+-  it.effect("shows the page html_render published when the agent reports only a summary", () =>
++describe("AntigravityAdapterV2 html_render and send_to_user outputs", () => {
++  it.effect("recovers html_render and send_to_user outputs when omitted or summarized", () =>
+     Effect.gen(function* () {
+       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+       const path = yield* Path.Path;
+@@ -852,6 +852,227 @@ describe("AntigravityAdapterV2 html_render pages", () => {
+                     toolCallId: "agy-1.5.8",
+                     status: "completed",
+                   });
++                  // send_to_user loses its MCP output on Antigravity too; recover recorded messages.
++                  const draft = "Draft:\n\n> Ships Thursday.";
++                  const failedDraft = "Failed draft";
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-summary",
++                    title: "Running send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: draft },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-unsent",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: "Never executed", toolSummary: "Send message" },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-failed",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: failedDraft, toolSummary: "Send message" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, draft);
++                  yield* mcpSessions.recordSentMessage(threadId, failedDraft);
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-unsent",
++                    status: "completed",
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-failed",
++                    status: "failed",
++                    rawOutput: "Summary of failed send",
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-summary",
++                    status: "completed",
++                    rawOutput: "Summary of sent-summary",
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-summary",
++                    status: "completed",
++                    rawOutput: "Repeated summary of sent-summary",
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-agy-1.5.8",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: "Full mid-turn update", toolSummary: "Send update" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, "Full mid-turn update");
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-agy-1.5.8",
++                    status: "completed",
++                  });
++                  // Repeated structured completions (even with an interleaved in_progress replay)
++                  // must not steal a sibling call's record.
++                  const repeatedText = "Identical update";
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-dup-1",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: repeatedText, toolSummary: "Send update" },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-dup-2",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: repeatedText, toolSummary: "Send update" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, repeatedText);
++                  yield* mcpSessions.recordSentMessage(threadId, repeatedText);
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-dup-1",
++                    status: "completed",
++                    rawOutput: { sentMessage: repeatedText },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-dup-1",
++                    status: "in_progress",
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-dup-1",
++                    status: "completed",
++                    rawOutput: { sentMessage: repeatedText },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-dup-2",
++                    status: "completed",
++                  });
++                  // A failed call that never ran must not steal a live sibling's sole record.
++                  const siblingText = "Shared sibling text";
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-sibling-fail",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: siblingText, toolSummary: "Send sibling" },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-sibling-ok",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: siblingText, toolSummary: "Send sibling" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, siblingText);
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-sibling-fail",
++                    status: "failed",
++                    rawOutput: "Permission denied",
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-sibling-ok",
++                    status: "completed",
++                  });
++                  // Completed MCP errors never render as sent messages, even with structuredContent.
++                  const erroredEmptyText = "Errored empty send";
++                  const erroredStructuredText = "Errored structured send";
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-error-empty",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: erroredEmptyText, toolSummary: "Send error" },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-error-structured",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: erroredStructuredText, toolSummary: "Send error" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, erroredEmptyText);
++                  yield* mcpSessions.recordSentMessage(threadId, erroredStructuredText);
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-error-empty",
++                    status: "completed",
++                    rawOutput: { result: { isError: true, content: [] } },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-error-structured",
++                    status: "completed",
++                    rawOutput: {
++                      result: {
++                        isError: true,
++                        structuredContent: { sentMessage: erroredStructuredText },
++                        content: [],
++                      },
++                    },
++                  });
++                  // Verbatim Markdown starting with "data:image/" prose survives sanitization.
++                  const proseText = "data:image/png is the prefix to look for";
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-prose-data-prefix",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: proseText, toolSummary: "Send prose" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, proseText);
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-prose-data-prefix",
++                    status: "completed",
++                  });
++                  // Inverse sibling case: if call A records and fails while identical call B never
++                  // completes, turn-end projected completion must not let B claim A's record, and
++                  // turn finalization clears the leftover record.
++                  const inverseSiblingText = "Inverse sibling text";
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-inv-fail",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: inverseSiblingText, toolSummary: "Send inverse" },
++                  });
++                  yield* send({
++                    sessionUpdate: "tool_call",
++                    toolCallId: "sent-inv-projected",
++                    title: "Run mcp_t3-code_send_to_user",
++                    kind: "other",
++                    status: "in_progress",
++                    rawInput: { message: inverseSiblingText, toolSummary: "Send inverse" },
++                  });
++                  yield* mcpSessions.recordSentMessage(threadId, inverseSiblingText);
++                  yield* send({
++                    sessionUpdate: "tool_call_update",
++                    toolCallId: "sent-inv-fail",
++                    status: "failed",
++                    rawOutput: "Transport lost",
++                  });
+                   return { stopReason: "end_turn" as const };
+                 }),
+             })),
+@@ -938,6 +1159,7 @@ describe("AntigravityAdapterV2 html_render pages", () => {
+           status: item.status,
+           toolName: item.toolName,
+           page: htmlRenderFromToolItem(item),
++          sentMessage: sentMessageFromToolItem(item),
+           output: item.output,
+         };
+       };
+@@ -946,24 +1168,28 @@ describe("AntigravityAdapterV2 html_render pages", () => {
+         status: "completed",
+         toolName: "t3-code.html_render",
+         page: page("replacement"),
++        sentMessage: undefined,
+         output: { htmlRender: page("replacement") },
+       });
+       assert.deepEqual(tool("unpublished"), {
+         status: "completed",
+         toolName: "t3-code.html_render",
+         page: undefined,
++        sentMessage: undefined,
+         output: "Summary of unpublished",
+       });
+       assert.deepEqual(tool("failed"), {
+         status: "failed",
+         toolName: "t3-code.html_render",
+         page: undefined,
++        sentMessage: undefined,
+         output: "Summary of failed",
+       });
+       assert.deepEqual(tool("error"), {
+         status: "completed",
+         toolName: "t3-code.html_render",
+         page: undefined,
++        sentMessage: undefined,
+         output: [],
+       });
+       assert.deepEqual(
+@@ -982,13 +1208,113 @@ describe("AntigravityAdapterV2 html_render pages", () => {
+           status: "completed",
+           toolName: "t3-code.html_render",
+           page: page(name),
++          sentMessage: undefined,
+           output: { htmlRender: page(name) },
+         });
+       }
++      assert.deepEqual(tool("sent-summary"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: "Draft:\n\n> Ships Thursday.",
++        output: { sentMessage: "Draft:\n\n> Ships Thursday." },
++      });
++      assert.deepEqual(tool("sent-agy-1.5.8"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: "Full mid-turn update",
++        output: { sentMessage: "Full mid-turn update" },
++      });
++      assert.deepEqual(tool("sent-unsent"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: undefined,
++      });
++      assert.deepEqual(tool("sent-failed"), {
++        status: "failed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: "Summary of failed send",
++      });
++      for (const name of ["sent-dup-1", "sent-dup-2"]) {
++        assert.deepEqual(tool(name), {
++          status: "completed",
++          toolName: "t3-code.send_to_user",
++          page: undefined,
++          sentMessage: "Identical update",
++          output: { sentMessage: "Identical update" },
++        });
++      }
++      assert.deepEqual(tool("sent-sibling-fail"), {
++        status: "failed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: "Permission denied",
++      });
++      assert.deepEqual(tool("sent-sibling-ok"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: "Shared sibling text",
++        output: { sentMessage: "Shared sibling text" },
++      });
++      assert.deepEqual(tool("sent-error-empty"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: [],
++      });
++      assert.deepEqual(tool("sent-error-structured"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: { isError: true },
++      });
++      assert.deepEqual(tool("sent-prose-data-prefix"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: "data:image/png is the prefix to look for",
++        output: { sentMessage: "data:image/png is the prefix to look for" },
++      });
++      assert.deepEqual(tool("sent-inv-fail"), {
++        status: "failed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: "Transport lost",
++      });
++      assert.deepEqual(tool("sent-inv-projected"), {
++        status: "completed",
++        toolName: "t3-code.send_to_user",
++        page: undefined,
++        sentMessage: undefined,
++        output: undefined,
++      });
+       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, report), undefined);
+       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, failed), undefined);
+       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, errored), undefined);
+       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, telemetry), undefined);
++      for (const message of [
++        "Draft:\n\n> Ships Thursday.",
++        "Failed draft",
++        "Full mid-turn update",
++        "Identical update",
++        "Shared sibling text",
++        "Errored empty send",
++        "Errored structured send",
++        "data:image/png is the prefix to look for",
++        "Inverse sibling text",
++      ]) {
++        assert.strictEqual(yield* mcpSessions.takeSentMessage(threadId, message), undefined);
++      }
+     }).pipe(Effect.provide(layerSession)),
+   );
+ });
+diff --git a/apps/server/src/provider/acp/AntigravityProtocol.test.ts b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
+index d86ca3ead0..261ba8dd3d 100644
+--- a/apps/server/src/provider/acp/AntigravityProtocol.test.ts
++++ b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
+@@ -628,9 +628,12 @@ describe("Antigravity tool results", () => {
+   });
+ 
+   it("bounds nested tool data and drops image blobs and data URLs", () => {
++    const commaLessParams = `data:image/png${";a".repeat(200)}`;
+     const payload = sanitizeAntigravityToolPayload({
+       rawOutput: {
+         text: "a".repeat(100_000),
++        prose: "data:image/png is the prefix to look for",
++        commaLessParams,
+         result: { mimeType: "image/png", blob: "image-blob".repeat(100_000) },
+         image: { type: "image", data: "inline-image".repeat(100_000) },
+         uri: "data:image/png;base64,inline-data-url",
+@@ -639,6 +642,8 @@ describe("Antigravity tool results", () => {
+     const serialized = JSON.stringify(payload);
+     expect(serialized.length).toBeLessThan(9_000);
+     expect(serialized).not.toContain("image-blob");
++    expect(serialized).toContain("data:image/png is the prefix to look for");
++    expect(serialized).toContain(commaLessParams);
+     expect(serialized).not.toContain("inline-image");
+     expect(serialized).not.toContain("inline-data-url");
+ 
+diff --git a/apps/server/src/provider/acp/AntigravityProtocol.ts b/apps/server/src/provider/acp/AntigravityProtocol.ts
+index 45aa74275e..abfe9e0316 100644
+--- a/apps/server/src/provider/acp/AntigravityProtocol.ts
++++ b/apps/server/src/provider/acp/AntigravityProtocol.ts
+@@ -316,7 +316,7 @@ function sanitizeToolValue(
+     return undefined;
+   }
+   if (typeof value === "string") {
+-    if (/^data:image\//i.test(value) || budget.text <= 0) {
++    if (/^data:image\/[a-z0-9.+-]+(?:;[^;,\s]+)*,/i.test(value) || budget.text <= 0) {
+       return undefined;
+     }
+     const bound =
+diff --git a/packages/provider-acp/src/server/adapter.ts b/packages/provider-acp/src/server/adapter.ts
+index 9d5ba78a04..88ba35b23e 100644
+--- a/packages/provider-acp/src/server/adapter.ts
++++ b/packages/provider-acp/src/server/adapter.ts
+@@ -41,9 +41,11 @@ import { modelSelectionsEqual } from "@t3tools/shared/model";
+ import { type SelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
+ import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
+ import {
++  SEND_TO_USER_TOOL_NAME,
+   compactDynamicToolOutput,
+   htmlRenderFromToolItem,
+   mcpToolResultOutput,
++  sentMessageFromToolItem,
+ } from "@t3tools/shared/toolOutput";
+ import { FILE_HEADERS_ONLY, formatPatch, structuredPatch } from "diff";
+ import * as Cause from "effect/Cause";
+@@ -1715,6 +1717,8 @@ interface ActiveAcpTurn {
+   readonly tools: Map<string, AcpToolCallState & { readonly backgroundCommandTaskId?: string }>;
+   /** Tools the agent failed after Stop; later updates keep them interrupted. */
+   readonly stoppedToolCallIds: Set<string>;
++  /** Per-call send_to_user outcome once settled, so replays never consume a sibling record. */
++  readonly claimedSentMessages: Map<string, string | null>;
+   readonly toolUpdatesSkipped: Map<string, number>;
+   readonly toolStartedAt: Map<string, DateTime.Utc>;
+   readonly subagents: Map<string, ActiveAcpSubagent>;
+@@ -4809,7 +4813,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+             const input =
+               mcpIdentity.input ?? unknownRecord(rawInputRecord?.arguments) ?? rawInputRecord ?? {};
+             let output = rawOutput === undefined ? undefined : acpMcpToolCallOutput(rawOutput);
+-            const isHtmlRender = resolveT3McpToolId(toolName) === HTML_RENDER_TOOL_NAME;
++            const t3ToolId = resolveT3McpToolId(toolName);
++            const isHtmlRender = t3ToolId === HTML_RENDER_TOOL_NAME;
++            const isSendToUser = t3ToolId === SEND_TO_USER_TOOL_NAME;
+             const isError =
+               compactDynamicToolOutput(output)?.isError === true ||
+               compactDynamicToolOutput(rawOutputRecord?.result)?.isError === true;
+@@ -4845,6 +4851,82 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+                 });
+               }
+             }
++            if (isSendToUser) {
++              const sendToUserInputMessage = (
++                candidateTool: AcpToolCallState,
++                candidateIdentity = extractMcpToolCallIdentity(candidateTool, {
++                  embeddedTerminalCommands: embeddedTerminalCommands(
++                    context.nativeThreadId,
++                    candidateTool.toolCallId,
++                  ),
++                }),
++              ): string | undefined => {
++                if (
++                  candidateIdentity === undefined ||
++                  resolveT3McpToolId(`${candidateIdentity.server}.${candidateIdentity.tool}`) !==
++                    SEND_TO_USER_TOOL_NAME
++                ) {
++                  return undefined;
++                }
++                const candidateRawInput = unknownRecord(candidateTool.data.rawInput);
++                const candidateInput =
++                  candidateIdentity.input ??
++                  unknownRecord(candidateRawInput?.arguments) ??
++                  candidateRawInput;
++                return typeof candidateInput?.message === "string"
++                  ? candidateInput.message
++                  : undefined;
++              };
++              const inputMessage = sendToUserInputMessage(toolCall, mcpIdentity);
++              const reportedMessage = sentMessageFromToolItem({ toolName, output });
++              const alreadyClaimed = context.claimedSentMessages.has(toolCall.toolCallId);
++              if (!alreadyClaimed) {
++                if (status === "failed" || (status === "completed" && isError)) {
++                  context.claimedSentMessages.set(toolCall.toolCallId, null);
++                  const candidate = reportedMessage ?? inputMessage;
++                  if (candidate !== undefined) {
++                    // Never drain a record that may belong to an unsettled sibling call with identical text.
++                    let unsettledPeers = 0;
++                    for (const [peerId, peer] of context.tools) {
++                      if (peerId === toolCall.toolCallId || context.claimedSentMessages.has(peerId))
++                        continue;
++                      if (peer.status === "failed" || peer.status === "completed") continue;
++                      if (sendToUserInputMessage(peer) === candidate) unsettledPeers += 1;
++                    }
++                    yield* mcpSessions.takeSentMessage(context.input.threadId, candidate, {
++                      minRemaining: unsettledPeers,
++                    });
++                  }
++                } else if (status === "completed") {
++                  if (reportedMessage !== undefined) {
++                    yield* mcpSessions.takeSentMessage(context.input.threadId, reportedMessage);
++                    context.claimedSentMessages.set(toolCall.toolCallId, reportedMessage);
++                  } else if (projectedStatus === undefined && inputMessage !== undefined) {
++                    // Only a provider-reported completion may claim an unverified session record;
++                    // synthesized turn-end completions must not adopt a failed sibling's record.
++                    const sentMessage = yield* mcpSessions.takeSentMessage(
++                      context.input.threadId,
++                      inputMessage,
++                    );
++                    context.claimedSentMessages.set(toolCall.toolCallId, sentMessage ?? null);
++                    if (sentMessage !== undefined) {
++                      output = { sentMessage };
++                    }
++                  } else {
++                    context.claimedSentMessages.set(toolCall.toolCallId, null);
++                  }
++                }
++              } else if (status === "completed" && !isError && reportedMessage === undefined) {
++                const claimed = context.claimedSentMessages.get(toolCall.toolCallId);
++                if (typeof claimed === "string") {
++                  output = { sentMessage: claimed };
++                }
++              }
++              if (status === "completed" && isError && reportedMessage !== undefined) {
++                // Keep the error visible to clients when acpMcpToolCallOutput unwrapped result.structuredContent.
++                output = { isError: true };
++              }
++            }
+             turnItem = {
+               ...base,
+               title: null,
+@@ -8716,6 +8798,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+               terminalizeSubagents: directStopQuarantine,
+             });
+           }
++          // Scope unclaimed send_to_user records to the turn so failed/interrupted sends cannot leak.
++          yield* mcpSessions.clearSentMessages(context.input.threadId);
+           yield* closeTextStreams(context);
+           // Ingestion may stop at turn.terminal, before a delayed flush would run.
+           yield* textEmissionPermit.withPermit(
+@@ -9751,6 +9835,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+               nativeMetadata: initialNativeMetadata,
+               tools: new Map(),
+               stoppedToolCallIds: new Set(),
++              claimedSentMessages: new Map(),
+               toolUpdatesSkipped: new Map(),
+               toolStartedAt: new Map(),
+               subagents: new Map(),
+diff --git a/packages/provider-acp/src/server/runtimeModel.ts b/packages/provider-acp/src/server/runtimeModel.ts
+index 1306d0a12c..eb83e9a177 100644
+--- a/packages/provider-acp/src/server/runtimeModel.ts
++++ b/packages/provider-acp/src/server/runtimeModel.ts
+@@ -10,7 +10,7 @@ import {
+   deriveToolActivityPresentation,
+   mergeToolActivityData,
+ } from "@t3tools/shared/toolActivity";
+-import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
++import { ANTIGRAVITY_TOOL_TITLE, T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
+ import type {
+   OrchestrationV2ProviderThreadNativeMetadata,
+   ThreadTokenUsageSnapshot,
+@@ -1125,9 +1125,6 @@ const T3_MCP_TITLE_SUFFIX_CALL =
+  */
+ const T3_MCP_BARE_TITLE_CALL = /^(?<tool>[A-Za-z0-9_]+)(?::\s*\{|$)/;
+ 
+-// Antigravity titles calls "Running <tool>" or, from agy 1.5.8, "Run mcp_<server>_<tool>"; prompts end in "?".
+-const ANTIGRAVITY_TOOL_TITLE = /^Run(?:ning)? (?<name>[^\s?]+)\??$/;
+-
+ /** ACP lacks typed MCP calls; recognize provider metadata and terminal fallback commands. */
+ export function extractMcpToolCallIdentity(
+   toolCall: AcpToolCallState,
+diff --git a/packages/provider-core/src/server/McpProviderSessions.ts b/packages/provider-core/src/server/McpProviderSessions.ts
+index a58498a0c2..ad3e319284 100644
+--- a/packages/provider-core/src/server/McpProviderSessions.ts
++++ b/packages/provider-core/src/server/McpProviderSessions.ts
+@@ -11,6 +11,7 @@ import type { McpProviderSessionConfig } from "./mcpSession.ts";
+ 
+ // Other providers may never consume these references.
+ const MAX_KEPT_HTML_RENDERS = 64;
++const MAX_KEPT_SENT_MESSAGES = 64;
+ 
+ // Antigravity truncates long HTML arguments to a marked tail of at most 8,000 characters.
+ const BOUNDED_TEXT_MARKER = "[Earlier output truncated]\n\n";
+@@ -51,6 +52,13 @@ export class McpProviderSessions extends Context.Service<
+       input: PageInput,
+       reported?: HtmlRenderReference,
+     ) => Effect.Effect<HtmlRenderReference | undefined>;
++    readonly recordSentMessage: (threadId: ThreadId, message: string) => Effect.Effect<void>;
++    readonly takeSentMessage: (
++      threadId: ThreadId,
++      message: string,
++      options?: { readonly minRemaining?: number },
++    ) => Effect.Effect<string | undefined>;
++    readonly clearSentMessages: (threadId: ThreadId) => Effect.Effect<void>;
+   }
+ >()("@t3tools/provider-core/server/McpProviderSessions") {}
+ 
+@@ -106,15 +114,28 @@ const matchingPageIndex = (kept: ReadonlyArray<KeptHtmlRender>, input: PageInput
+ const make = Effect.gen(function* () {
+   const sessions = yield* Ref.make(new Map<ThreadId, McpProviderSessionConfig>());
+   const htmlRenders = yield* Ref.make(new Map<ThreadId, ReadonlyArray<KeptHtmlRender>>());
++  const sentMessages = yield* Ref.make(new Map<ThreadId, ReadonlyArray<string>>());
++  const clearThreadOutputs = (threadId: ThreadId) =>
++    Effect.all(
++      [
++        Ref.update(htmlRenders, (current) => {
++          const next = new Map(current);
++          next.delete(threadId);
++          return next;
++        }),
++        Ref.update(sentMessages, (current) => {
++          const next = new Map(current);
++          next.delete(threadId);
++          return next;
++        }),
++      ],
++      { discard: true },
++    );
+   return McpProviderSessions.of({
+     set: Effect.fn("McpProviderSessions.set")(function* (config) {
+       const current = yield* Ref.get(sessions);
+       if (current.get(config.threadId)?.providerSessionId !== config.providerSessionId) {
+-        yield* Ref.update(htmlRenders, (kept) => {
+-          const next = new Map(kept);
+-          next.delete(config.threadId);
+-          return next;
+-        });
++        yield* clearThreadOutputs(config.threadId);
+       }
+       yield* Ref.update(sessions, (current) => new Map(current).set(config.threadId, config));
+     }),
+@@ -126,15 +147,7 @@ const make = Effect.gen(function* () {
+         const next = new Map(current);
+         next.delete(threadId);
+         return next;
+-      }).pipe(
+-        Effect.andThen(
+-          Ref.update(htmlRenders, (current) => {
+-            const next = new Map(current);
+-            next.delete(threadId);
+-            return next;
+-          }),
+-        ),
+-      );
++      }).pipe(Effect.andThen(clearThreadOutputs(threadId)));
+     }),
+     recordHtmlRender: Effect.fn("McpProviderSessions.recordHtmlRender")(
+       function (threadId, input, reference) {
+@@ -182,6 +195,53 @@ const make = Effect.gen(function* () {
+         });
+       },
+     ),
++    recordSentMessage: Effect.fn("McpProviderSessions.recordSentMessage")(
++      function (threadId, message) {
++        return Ref.update(sentMessages, (current) =>
++          new Map(current).set(
++            threadId,
++            [...(current.get(threadId) ?? []), message].slice(-MAX_KEPT_SENT_MESSAGES),
++          ),
++        );
++      },
++    ),
++    takeSentMessage: Effect.fn("McpProviderSessions.takeSentMessage")(
++      function (threadId, message, options) {
++        return Ref.modify(sentMessages, (current) => {
++          const kept = current.get(threadId) ?? [];
++          const minRemaining = options?.minRemaining ?? 0;
++          if (minRemaining > 0) {
++            let matches = 0;
++            for (const entry of kept) {
++              if (entry === message) matches += 1;
++            }
++            if (matches <= minRemaining) {
++              return [undefined, current];
++            }
++          }
++          const index = kept.indexOf(message);
++          if (index === -1) {
++            return [undefined, current];
++          }
++          const rest = kept.filter((_, keptIndex) => keptIndex !== index);
++          const next = new Map(current);
++          if (rest.length === 0) {
++            next.delete(threadId);
++          } else {
++            next.set(threadId, rest);
++          }
++          return [message, next];
++        });
++      },
++    ),
++    clearSentMessages: Effect.fn("McpProviderSessions.clearSentMessages")(function (threadId) {
++      return Ref.update(sentMessages, (current) => {
++        if (!current.has(threadId)) return current;
++        const next = new Map(current);
++        next.delete(threadId);
++        return next;
++      });
++    }),
+   });
+ });
+ 
+diff --git a/packages/shared/src/t3McpToolPresentation.test.ts b/packages/shared/src/t3McpToolPresentation.test.ts
+index 4d30e4972d..cd988accd0 100644
+--- a/packages/shared/src/t3McpToolPresentation.test.ts
++++ b/packages/shared/src/t3McpToolPresentation.test.ts
+@@ -22,6 +22,8 @@ describe("resolveT3McpToolPresentation", () => {
+         "t3_code/",
+         "t3code:",
+         "mcp_t3-code_",
++        "Run mcp_t3-code_",
++        "Running ",
+         "T3 Code ",
+         "t3-code · ",
+       ]) {
+@@ -29,8 +31,12 @@ describe("resolveT3McpToolPresentation", () => {
+           presentation,
+         );
+       }
++      expect(resolveT3McpToolPresentation(`Run mcp_t3-code_${tool}?`), tool).toEqual(presentation);
+       expect(resolveT3McpToolPresentation(`mcp__another-server__${tool}`), tool).toBeNull();
++      expect(resolveT3McpToolPresentation(`Run mcp__another-server__${tool}`), tool).toBeNull();
++      expect(resolveT3McpToolPresentation(`Run mcp_another_${tool}`), tool).toBeNull();
+     }
++    expect(resolveT3McpToolPresentation("Run manage_task")).toBeNull();
+   });
+ 
+   it("matches OpenCode 2's per-thread server names, whose thread ids hold underscores", () => {
+diff --git a/packages/shared/src/t3McpToolPresentation.ts b/packages/shared/src/t3McpToolPresentation.ts
+index 860f28c44f..3382843305 100644
+--- a/packages/shared/src/t3McpToolPresentation.ts
++++ b/packages/shared/src/t3McpToolPresentation.ts
+@@ -465,9 +465,13 @@ function resolveT3McpToolName(value: string): string | null {
+   return name;
+ }
+ 
++// Antigravity titles calls "Running <tool>" or, from agy 1.5.8, "Run mcp_<server>_<tool>"; prompts end in "?".
++export const ANTIGRAVITY_TOOL_TITLE = /^Run(?:ning)? (?<name>[^\s?]+)\??$/;
++
+ // ACP tool prefixes vary; match loosely but require a known display-name entry.
+ function parseT3McpToolName(value: string): string | null {
+-  const label = normalizeT3McpToolLabel(value);
++  const normalized = normalizeT3McpToolLabel(value);
++  const label = ANTIGRAVITY_TOOL_TITLE.exec(normalized)?.groups?.name ?? normalized;
+   const mcpMatch = /^mcp__(?<server>.+?)__(?<tool>.+)$/i.exec(label);
+   if (mcpMatch?.groups) {
+     const { server, tool } = mcpMatch.groups;
