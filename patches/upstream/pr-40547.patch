@@ -1,0 +1,453 @@
+diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
+index c20afa04e3..23c01441d7 100644
+--- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
++++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
+@@ -44,6 +44,7 @@ import {
+   antigravityCommandOutlivesPrompt,
+   antigravitySubagentOutput,
+   classifyAntigravitySubagentToolCall,
++  extractAntigravityElicitationForm,
+   extractAntigravityUserInputQuestion,
+   makeAntigravityReadRepair,
+   makeAntigravityUserInputResponse,
+@@ -291,6 +292,7 @@ export function makeAntigravityAcpAdapterFlavor(
+         respond: (answers) => makeAntigravityUserInputResponse(request, answers),
+       };
+     },
++    extractElicitationForm: extractAntigravityElicitationForm,
+     normalizeToolCall: normalizeAntigravityToolCall,
+     extractSubagentUpdate: extractAntigravitySubagentUpdate,
+     supportsImagePrompts: true,
+diff --git a/apps/server/src/provider/acp/AntigravityProtocol.test.ts b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
+index d86ca3ead0..70d370f2e0 100644
+--- a/apps/server/src/provider/acp/AntigravityProtocol.test.ts
++++ b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
+@@ -4,6 +4,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
+ import * as AcpWireSchema from "effect-acp/schema-v1";
+ 
+ import {
++  extractAntigravityElicitationForm,
+   extractAntigravityUserInputQuestion,
+   antigravityApprovalOptions,
+   antigravitySubagentOutput,
+@@ -271,6 +272,202 @@ describe("Antigravity permissions and questions", () => {
+       makeAntigravityUserInputResponse(request, { interaction_9960062f: label + "..." }),
+     ).toEqual({ outcome: { outcome: "selected", optionId: "stable-choice" } });
+   });
++
++  const elicitationRequest = (
++    properties: Record<string, unknown>,
++    required?: ReadonlyArray<string>,
++  ) =>
++    ({
++      sessionId: "session-1",
++      mode: "form",
++      message: "The agent has 2 questions.",
++      requestedSchema: {
++        type: "object",
++        properties,
++        ...(required === undefined ? {} : { required }),
++      },
++    }) as EffectAcpSchema.CreateElicitationRequest;
++
++  const singleChoiceField = {
++    type: "string",
++    title: "For Layer 2 of the pipeline, which LLM backend should we default to?",
++    oneOf: [
++      { const: "1", title: "OpenAI-compatible adapter", description: "Local and cloud via config" },
++      { const: "2", title: "Local-only server" },
++    ],
++  };
++  const multiChoiceField = {
++    type: "array",
++    title: "Which verification stages should run automatically?",
++    items: {
++      anyOf: [
++        { const: "1", title: "Type checking" },
++        { const: "2", title: "Unit tests" },
++        { const: "3", title: "Fuzzing" },
++      ],
++    },
++  };
++  const otherField = (question: string) => ({
++    type: "string",
++    title: "Other",
++    description: `Optional free-form answer to: ${question}`,
++  });
++
++  it("folds ask_question single- and multi-select choices with their Other field and orders numerically", () => {
++    const form = extractAntigravityElicitationForm(
++      elicitationRequest({
++        q1: singleChoiceField,
++        q1_other: otherField(singleChoiceField.title),
++        q10: {
++          type: "string",
++          title: "Final confirmation?",
++          oneOf: [{ const: "1", title: "Yes" }],
++        },
++        q10_other: otherField("Final confirmation?"),
++        q2: multiChoiceField,
++        q2_other: otherField(multiChoiceField.title),
++      }),
++    );
++
++    expect(form?.questions).toEqual([
++      {
++        id: "q1",
++        header: "Question 1",
++        question: singleChoiceField.title,
++        options: [
++          {
++            label: "OpenAI-compatible adapter",
++            value: "1",
++            description: "Local and cloud via config",
++          },
++          { label: "Local-only server", value: "2", description: "Local-only server" },
++        ],
++      },
++      {
++        id: "q2",
++        header: "Question 2",
++        question: multiChoiceField.title,
++        options: [
++          { label: "Type checking", value: "1", description: "Type checking" },
++          { label: "Unit tests", value: "2", description: "Unit tests" },
++          { label: "Fuzzing", value: "3", description: "Fuzzing" },
++        ],
++        multiSelect: true,
++      },
++      {
++        id: "q10",
++        header: "Question 3",
++        question: "Final confirmation?",
++        options: [{ label: "Yes", value: "1", description: "Yes" }],
++      },
++    ]);
++
++    expect(form?.respond({ q1: "2", q2: ["1", "3", "1"], q10: "1" })).toEqual({
++      action: "accept",
++      content: { q1: "2", q2: ["1", "3"], q10: "1" },
++    });
++
++    expect(
++      form?.respond({ q1: "Use Gemini Flash", q2: "Only integration checks", q10: "Wait" }),
++    ).toEqual({
++      action: "accept",
++      content: {
++        q1_other: "Use Gemini Flash",
++        q2_other: "Only integration checks",
++        q10_other: "Wait",
++      },
++    });
++  });
++
++  it("splits attachment references onto qN_other while keeping selected choices on qN", () => {
++    const form = extractAntigravityElicitationForm(
++      elicitationRequest({
++        q1: singleChoiceField,
++        q1_other: otherField(singleChoiceField.title),
++        q2: multiChoiceField,
++        q2_other: otherField(multiChoiceField.title),
++      }),
++    );
++    const imageRef = 'Attached image "shot.png": "/tmp/shot.png"';
++    const fileRef = 'Attached file "spec.txt": "/tmp/spec.txt"';
++
++    expect(
++      form?.respond({
++        q1: `1\n\n${imageRef}`,
++        q2: ["1", "3", fileRef],
++      }),
++    ).toEqual({
++      action: "accept",
++      content: {
++        q1: "1",
++        q1_other: imageRef,
++        q2: ["1", "3"],
++        q2_other: fileRef,
++      },
++    });
++
++    expect(form?.respond({ q1: imageRef, q2: fileRef })).toEqual({
++      action: "accept",
++      content: { q1_other: imageRef, q2_other: fileRef },
++    });
++  });
++
++  it.each([
++    ["missing answer", { q2: ["1"] }],
++    ["array answer for single-select", { q1: ["1"], q2: ["1"] }],
++    ["unknown option in multi-select array", { q1: "1", q2: ["1", "unknown"] }],
++  ])("cancels ask_question elicitation on %s", (_, answers) => {
++    const form = extractAntigravityElicitationForm(
++      elicitationRequest({
++        q1: singleChoiceField,
++        q1_other: otherField(singleChoiceField.title),
++        q2: multiChoiceField,
++        q2_other: otherField(multiChoiceField.title),
++      }),
++    );
++    expect(form?.respond(answers)).toEqual({ action: "cancel" });
++  });
++
++  it.each([
++    [
++      "extra unrelated field",
++      elicitationRequest({
++        q1: singleChoiceField,
++        q1_other: otherField(singleChoiceField.title),
++        note: { type: "string", title: "Note" },
++      }),
++    ],
++    ["orphan companion", elicitationRequest({ q1_other: otherField("orphan") })],
++    [
++      "required field",
++      elicitationRequest({ q1: singleChoiceField, q1_other: otherField(singleChoiceField.title) }, [
++        "q1",
++      ]),
++    ],
++    [
++      "multi-select with item count constraints",
++      elicitationRequest({
++        q1: { ...multiChoiceField, minItems: 1 },
++        q1_other: otherField(multiChoiceField.title),
++      }),
++    ],
++    [
++      "duplicate option values",
++      elicitationRequest({
++        q1: {
++          type: "string",
++          title: "Pick one",
++          oneOf: [
++            { const: "1", title: "First" },
++            { const: "1", title: "Second" },
++          ],
++        },
++        q1_other: otherField("Pick one"),
++      }),
++    ],
++  ])("leaves %s to the generic ACP form parser", (_, request) => {
++    expect(extractAntigravityElicitationForm(request)).toBeUndefined();
++  });
+ });
+ 
+ describe("Antigravity tool results", () => {
+diff --git a/apps/server/src/provider/acp/AntigravityProtocol.ts b/apps/server/src/provider/acp/AntigravityProtocol.ts
+index 008579d087..146ed940e8 100644
+--- a/apps/server/src/provider/acp/AntigravityProtocol.ts
++++ b/apps/server/src/provider/acp/AntigravityProtocol.ts
+@@ -1,7 +1,9 @@
+-import type {
+-  ProviderApprovalOption,
+-  ProviderUserInputAnswers,
+-  UserInputQuestion,
++import {
++  type OrchestrationV2UserInputQuestion,
++  type ProviderApprovalOption,
++  type ProviderUserInputAnswers,
++  TrimmedNonEmptyString,
++  type UserInputQuestion,
+ } from "@t3tools/contracts";
+ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+ import * as Option from "effect/Option";
+@@ -10,6 +12,7 @@ import * as Schema from "effect/Schema";
+ import type * as EffectAcpSchema from "effect-acp/compat";
+ import * as AcpWireSchema from "effect-acp/schema-v1";
+ 
++import type { AcpAdapterV2Flavor } from "@t3tools/provider-acp/server/adapter";
+ import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
+ 
+ import {
+@@ -184,6 +187,191 @@ export function makeAntigravityUserInputResponse(
+   return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : undefined;
+ }
+ 
++const ElicitationChoice = Schema.Struct({
++  const: TrimmedNonEmptyString,
++  title: TrimmedNonEmptyString,
++  description: Schema.optional(Schema.NullOr(Schema.String)),
++});
++type ElicitationChoice = typeof ElicitationChoice.Type;
++
++const isElicitationForm = Schema.is(
++  Schema.Struct({
++    properties: Schema.Record(Schema.String, Schema.Unknown),
++    required: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
++  }),
++);
++const isSingleElicitationQuestion = Schema.is(
++  Schema.Struct({
++    type: Schema.Literal("string"),
++    title: TrimmedNonEmptyString,
++    oneOf: Schema.NonEmptyArray(ElicitationChoice),
++    enum: Schema.optional(Schema.Null),
++  }),
++);
++const isMultiElicitationQuestion = Schema.is(
++  Schema.Struct({
++    type: Schema.Literal("array"),
++    title: TrimmedNonEmptyString,
++    items: Schema.Struct({
++      type: Schema.optional(Schema.Null),
++      anyOf: Schema.NonEmptyArray(ElicitationChoice),
++      enum: Schema.optional(Schema.Null),
++    }),
++    minItems: Schema.optional(Schema.Null),
++    maxItems: Schema.optional(Schema.Null),
++  }),
++);
++const isElicitationCompanion = Schema.is(
++  Schema.Struct({
++    type: Schema.Literal("string"),
++    oneOf: Schema.optional(Schema.Null),
++    enum: Schema.optional(Schema.Null),
++    anyOf: Schema.optional(Schema.Null),
++  }),
++);
++
++// Matches file references appended by `appendUserInputAttachmentPaths`.
++const QUESTION_ATTACHMENT_PATTERN = /^Attached (?:image|file) "(?:\\.|[^"\\\r\n])*": "/;
++
++function extractElicitationChoices(field: unknown):
++  | {
++      readonly title: string;
++      readonly choices: ReadonlyArray<ElicitationChoice>;
++      readonly multiSelect: boolean;
++    }
++  | undefined {
++  if (isSingleElicitationQuestion(field)) {
++    return { title: field.title.trim(), choices: field.oneOf, multiSelect: false };
++  }
++  if (isMultiElicitationQuestion(field)) {
++    return { title: field.title.trim(), choices: field.items.anyOf, multiSelect: true };
++  }
++  return undefined;
++}
++
++/**
++ * ask_question pairs each qN choice (single- or multi-select) with a qN_other text field and
++ * puts the question text in title. Fold each pair into one question and route custom answers or
++ * attachment notes to qN_other (agy appends qN_other to the resolved option labels).
++ */
++export const extractAntigravityElicitationForm: NonNullable<
++  AcpAdapterV2Flavor["extractElicitationForm"]
++> = (request) => {
++  if (request.mode !== "form" || !isElicitationForm(request.requestedSchema)) return undefined;
++  const { properties, required } = request.requestedSchema;
++  if (required !== undefined && required !== null && required.length > 0) return undefined;
++
++  const matched: Array<{
++    readonly id: string;
++    readonly index: number;
++    readonly title: string;
++    readonly choices: ReadonlyArray<ElicitationChoice>;
++    readonly optionValues: ReadonlySet<string>;
++    readonly multiSelect: boolean;
++  }> = [];
++
++  for (const [id, field] of Object.entries(properties)) {
++    if (!/^q[1-9]\d*$/.test(id)) continue;
++    const parsed = extractElicitationChoices(field);
++    const companionId = `${id}_other`;
++    if (
++      parsed === undefined ||
++      !Object.hasOwn(properties, companionId) ||
++      !isElicitationCompanion(properties[companionId])
++    ) {
++      return undefined;
++    }
++    const optionValues = new Set(parsed.choices.map((option) => option.const));
++    if (optionValues.size !== parsed.choices.length) return undefined;
++    matched.push({
++      id,
++      index: Number(id.slice(1)),
++      title: parsed.title,
++      choices: parsed.choices,
++      optionValues,
++      multiSelect: parsed.multiSelect,
++    });
++  }
++
++  // Leave partial or differently shaped forms to the generic ACP fallback.
++  if (matched.length === 0 || Object.keys(properties).length !== matched.length * 2) {
++    return undefined;
++  }
++
++  // Go serializes map keys lexicographically (q1, q10, q2); restore numeric order.
++  matched.sort((left, right) => left.index - right.index);
++
++  const questions: OrchestrationV2UserInputQuestion[] = matched.map((entry, position) => ({
++    id: entry.id,
++    header: `Question ${position + 1}`,
++    question: entry.title,
++    options: entry.choices.map((option) => {
++      const label = option.title.trim();
++      return {
++        label,
++        value: option.const,
++        description: option.description?.trim() || label,
++      };
++    }),
++    ...(entry.multiSelect ? { multiSelect: true } : {}),
++  }));
++
++  return {
++    questions,
++    respond: (answers) => {
++      const entries: Array<[string, EffectAcpSchema.ElicitationContentValue]> = [];
++      for (const entry of matched) {
++        const answer = Object.hasOwn(answers, entry.id) ? answers[entry.id] : undefined;
++        const companionId = `${entry.id}_other`;
++
++        if (entry.multiSelect) {
++          if (Array.isArray(answer)) {
++            const selected = new Set<string>();
++            const notes: string[] = [];
++            for (const item of answer) {
++              if (typeof item !== "string") return { action: "cancel" };
++              if (entry.optionValues.has(item)) {
++                selected.add(item);
++              } else if (QUESTION_ATTACHMENT_PATTERN.test(item)) {
++                notes.push(item);
++              } else {
++                return { action: "cancel" };
++              }
++            }
++            if (selected.size === 0 && notes.length === 0) return { action: "cancel" };
++            if (selected.size > 0) entries.push([entry.id, [...selected]]);
++            if (notes.length > 0) entries.push([companionId, notes.join("\n")]);
++          } else if (typeof answer === "string" && answer.trim().length > 0) {
++            entries.push([companionId, answer]);
++          } else {
++            return { action: "cancel" };
++          }
++          continue;
++        }
++
++        if (typeof answer !== "string" || answer.trim().length === 0) {
++          return { action: "cancel" };
++        }
++        if (entry.optionValues.has(answer)) {
++          entries.push([entry.id, answer]);
++          continue;
++        }
++        const marker = answer.indexOf("\n\n");
++        if (marker >= 0) {
++          const prefix = answer.slice(0, marker);
++          const note = answer.slice(marker + 2);
++          if (entry.optionValues.has(prefix) && QUESTION_ATTACHMENT_PATTERN.test(note)) {
++            entries.push([entry.id, prefix], [companionId, note]);
++            continue;
++          }
++        }
++        entries.push([companionId, answer]);
++      }
++      return { action: "accept", content: Object.fromEntries(entries) };
++    },
++  };
++};
++
+ function boundText(text: string, limit = TOOL_TEXT_LIMIT): string {
+   return text.length <= limit
+     ? text
