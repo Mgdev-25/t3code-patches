@@ -542,7 +542,7 @@ const ensurePeriod = (text: string): string => {
 
 function formatPatchBullet(title: string, body: string): string {
   const cleanTitle = title.trim().replace(/\.+$/, "").replace(/\*/g, "");
-  return `- **${cleanTitle}.** ${ensurePeriod(body)}`;
+  return `- **🟣 ${cleanTitle}.** ${ensurePeriod(body)}`;
 }
 
 function mergeMeta(...sources: ReadonlyArray<PatchMeta | undefined>): PatchMeta {
@@ -553,7 +553,7 @@ function mergeMeta(...sources: ReadonlyArray<PatchMeta | undefined>): PatchMeta 
 }
 
 /**
- * Upstream-style `- **Title.** Description.` bullets for server and desktop patches that changed
+ * Upstream-style `- **🟣 Title.** Description.` bullets for server and desktop patches that changed
  * compared to the previous published store build, were left out, newly closed upstream, or failed
  * to build. Mobile-only patches stay in PATCHES.json and the collapsed Store patches block. Empty
  * when clean and unchanged so the desktop update notice stays pure upstream T3 Code notes.

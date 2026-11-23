@@ -381,11 +381,11 @@ test("releaseNotes adds descriptive upstream-style bullets for changed server pa
   });
   const bullets = patchChangeLines(current, prev);
   assert.deepEqual(bullets, [
-    "- **Antigravity message queue (closed upstream).** Queues messages while a question waits. Upstream PR closed without merge, review needed.",
-    "- **Child end notice hold (updated).** Groups child end notices up to 120 seconds.",
-    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
-    "- **Old server fix (dropped).** Removed from the store patch list.",
-    "- **Voice cleanup Codex credits (left out).** Not included in this build. Keeps Codex Terra while credits remain.",
+    "- **🟣 Antigravity message queue (closed upstream).** Queues messages while a question waits. Upstream PR closed without merge, review needed.",
+    "- **🟣 Child end notice hold (updated).** Groups child end notices up to 120 seconds.",
+    "- **🟣 Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+    "- **🟣 Old server fix (dropped).** Removed from the store patch list.",
+    "- **🟣 Voice cleanup Codex credits (left out).** Not included in this build. Keeps Codex Terra while credits remain.",
   ]);
   const notes = releaseNotes(current, { upstreamNotes: UPSTREAM_NOTES, previousReport: prev });
   assert.ok(
@@ -395,6 +395,48 @@ test("releaseNotes adds descriptive upstream-style bullets for changed server pa
         "\n\n### Plus 24 more bug fixes and performance improvements.",
     ),
   );
+});
+
+test("store patch bullets start the bold title with a purple dot and match upstream highlight regex", () => {
+  const upstreamHighlight = /^\*\*([^*]+)\*\* (.+)$/;
+  const plan = { needed: true, tag: "v0.1.12-nightly.20261123.5124", version: "0.1.12-nightly.20261123.5124", latest: true };
+  const prev = buildReport({
+    plan: { ...plan, tag: "v0.1.12-nightly.20261122.5111", version: "0.1.12-nightly.20261122.5111" },
+    apply: { applied: [], skipped: [], server: false, mobile: false },
+    notices: [],
+    server: "copied",
+    android: "not-needed",
+    desktop: "not-needed",
+  });
+  const current = buildReport({
+    plan,
+    apply: {
+      applied: [
+        {
+          id: "1456-notice-hold",
+          parts: ["server"],
+          sha256: "aaaaaaaaaaaa",
+          title: "Child end notice hold",
+          summary: "Groups delegated child end notices for an idle parent up to 120 seconds.",
+        },
+      ],
+      skipped: [],
+      server: true,
+      mobile: false,
+    },
+    notices: [],
+    server: "built",
+    android: "not-needed",
+    desktop: "built",
+  });
+  const bullets = patchChangeLines(current, prev);
+  assert.deepEqual(bullets, [
+    "- **🟣 Child end notice hold.** Groups delegated child end notices for an idle parent up to 120 seconds.",
+  ]);
+  const match = upstreamHighlight.exec(bullets[0]!.replace(/^- /, ""));
+  assert.ok(match !== null);
+  assert.equal(match[1], "🟣 Child end notice hold.");
+  assert.equal(match[2], "Groups delegated child end notices for an idle parent up to 120 seconds.");
 });
 
 test("failed server builds emit only the failure bullet, desktop-only failures keep shipped server bullets", () => {
@@ -425,7 +467,7 @@ test("failed server builds emit only the failure bullet, desktop-only failures k
   assert.equal(isPublishedServerBaseline(failed), false);
   // Failed server build does not advertise pr-39799 even though apply succeeded.
   assert.deepEqual(patchChangeLines(failed, prev), [
-    "- **Store build failed.** Server and desktop build failed, check the release details.",
+    "- **🟣 Store build failed.** Server and desktop build failed, check the release details.",
   ]);
   // Desktop-only failure still shipped the patched server archive, so it keeps patch bullets plus the failure bullet.
   const desktopOnlyFailed = buildReport({
@@ -444,8 +486,8 @@ test("failed server builds emit only the failure bullet, desktop-only failures k
   });
   assert.equal(isPublishedServerBaseline(desktopOnlyFailed), true);
   assert.deepEqual(patchChangeLines(desktopOnlyFailed, prev), [
-    "- **Antigravity message queue.** Queues messages while a question waits.",
-    "- **Store build failed.** Desktop build failed, check the release details.",
+    "- **🟣 Antigravity message queue.** Queues messages while a question waits.",
+    "- **🟣 Store build failed.** Desktop build failed, check the release details.",
   ]);
   // Without a healthy baseline, a merged mobile PR without server scope stays out of the desktop popup.
   const mergedWithoutBaseline = buildReport({
@@ -460,7 +502,7 @@ test("failed server builds emit only the failure bullet, desktop-only failures k
     desktop: "not-needed",
   });
   assert.deepEqual(patchChangeLines(mergedWithoutBaseline, failed), [
-    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+    "- **🟣 Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
   ]);
   // Carrying merge notices across a failed release preserves "(merged upstream)" on the next healthy release.
   const healthyBefore = buildReport({
@@ -496,7 +538,7 @@ test("failed server builds emit only the failure bullet, desktop-only failures k
     desktop: "not-needed",
   });
   assert.deepEqual(patchChangeLines(healthyNext, baseline), [
-    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+    "- **🟣 Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
   ]);
   // A replace run for the same tag keeps the older baseline and preserves merge notices from the replaced report.
   const firstRunOfTag = buildReport({
@@ -520,8 +562,8 @@ test("failed server builds emit only the failure bullet, desktop-only failures k
     desktop: "built",
   });
   assert.deepEqual(patchChangeLines(replacedReport, replaceBaseline), [
-    "- **Child end notice hold.** Groups child end notices.",
-    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+    "- **🟣 Child end notice hold.** Groups child end notices.",
+    "- **🟣 Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
   ]);
   // A replace run with no older healthy baseline still preserves same-tag merge notices in both bullets and PATCHES.json.
   const replaceNoBaseline = selectPreviousBaseline([], firstRunOfTag);
@@ -537,7 +579,7 @@ test("failed server builds emit only the failure bullet, desktop-only failures k
     desktop: "not-needed",
   });
   assert.deepEqual(patchChangeLines(replacedNoBaselineReport, replaceNoBaseline), [
-    "- **Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
+    "- **🟣 Muse Code usage limits (merged upstream).** Included in upstream T3 Code, store patch dropped.",
   ]);
 });
 
@@ -578,7 +620,7 @@ test("releaseNotes inserts a blank line before bullets when upstream summary has
   assert.ok(
     notes.includes(
       "**v0.1.12-nightly.20261122.5072** · 5 changes from 2 contributors\n\n" +
-        "- **Child end notice hold.** Groups child end notices.\n\n" +
+        "- **🟣 Child end notice hold.** Groups child end notices.\n\n" +
         "### Plus 5 more bug fixes and performance improvements.",
     ),
   );
