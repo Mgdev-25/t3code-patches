@@ -27,7 +27,7 @@
     },
     {
       "pr": 40244,
-      "head": "2e9755ca7c5d7c492c6041d1690d84525ec1e002",
+      "head": "19d0b9291261b1ff967dfa0740e32d9c249e0ede",
       "bug": 18,
       "file": "patches/upstream/pr-40244.patch",
       "title": "Antigravity quota auto-resume",
