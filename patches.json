@@ -34,12 +34,12 @@
       "summary": "Reads Antigravity quota reset times so rate-limited threads resume automatically."
     },
     {
-      "pr": 37119,
-      "head": "407e45bde96712bb5e511f6848cc79eea3f5daf2",
-      "bug": 18,
-      "file": "patches/upstream/pr-37119.patch",
+      "pr": 40547,
+      "head": "a63f44ffae84c69f10fb8a68c9ca5524b735f44f",
+      "bug": 1630,
+      "file": "patches/upstream/pr-40547.patch",
       "title": "Antigravity question forms",
-      "summary": "Asks each Antigravity ask_question choice once with its free-form answer."
+      "summary": "Folds single- and multi-select Antigravity ask_question choices with their Other field and orders them numerically."
     },
     {
       "pr": 38956,
