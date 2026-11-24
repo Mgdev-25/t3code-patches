@@ -114,6 +114,15 @@
       "summary": "Adds a Fallback cleanup model row under Settings, Voice, Cleanup.",
       "check": "Settings > Voice > Cleanup shows a Fallback cleanup model row under Cleanup model, and it saves the model. When the cleanup model is out of usage (for Codex: also no credits) or cannot run, cleanup runs on the fallback model when it can run, else on T3's own fallback. Morgan's feature exception of 2026-11-17 in Shell issue 1210. Builds on 1472-codex-credits.",
       "dropWhen": "Upstream server settings have a fallback model for voice transcript cleanup."
+    },
+    {
+      "id": "1652-pending-check-poll",
+      "bug": 1652,
+      "file": "patches/own/1652-pending-check-poll.patch",
+      "title": "PR watch short poll",
+      "summary": "Sweeps watched pull requests every 30 seconds while a check runs, and every 2 minutes otherwise.",
+      "check": "Watch a PR while its CI runs. The wake comes at most about 30 seconds after GitHub shows the green status, plus the read time. With no check running, the sweeps stay 2 minutes apart. Measure the median green-to-wake time over 10 PRs with watch-delay/measure.py of Shell issue 1652.",
+      "dropWhen": "Upstream PullRequestWatchReactor sweeps more often than every 2 minutes while a watched pull request has a running check, or wakes on GitHub commit status events."
     }
   ]
 }
