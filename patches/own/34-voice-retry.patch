@@ -1,0 +1,2480 @@
+diff --git a/apps/mobile/src/features/issues/IssueCommentComposer.tsx b/apps/mobile/src/features/issues/IssueCommentComposer.tsx
+index 901dee46..1346a7b8 100644
+--- a/apps/mobile/src/features/issues/IssueCommentComposer.tsx
++++ b/apps/mobile/src/features/issues/IssueCommentComposer.tsx
+@@ -1,5 +1,5 @@
+ import { useGT } from "gt-react-native";
+-import { useRef, useState } from "react";
++import { useEffect, useRef, useState } from "react";
+ import { Platform, View } from "react-native";
+ import Animated from "react-native-reanimated";
+ 
+@@ -65,17 +65,31 @@ export function IssueCommentComposer(props: {
+   const textStyle = useComposerTextStyle(bodyText);
+   const chrome = useComposerChrome();
+   const [focused, setFocused] = useState(false);
++  const mounted = useRef(true);
+   // Animate only while typing, as the thread composer does; a restored draft lands in place.
+   const compactEditor = useCompactComposerEditor(bodyText, draft, Platform.OS === "ios" && focused);
+   const voiceInput = useVoiceInputController({
+     ownerKey: props.ownerKey,
+     label: props.label,
+-    readDraftMessage: () => latestDraft.current,
++    readDraftMessage: () => (mounted.current ? latestDraft.current : null),
+     selection,
+     disabled: props.blocked !== null,
+-    onChangeDraftMessage: changeDraft,
++    onChangeDraftMessage: (text) => {
++      if (mounted.current) changeDraft(text);
++    },
+     onChangeSelection: setSelection,
+   });
++  const cancelVoiceOnUnmount = useRef(voiceInput.cancel);
++  // oxlint-disable-next-line react/refs -- Unmount must cancel any in-flight or saved recording for this local-state comment draft.
++  cancelVoiceOnUnmount.current = voiceInput.cancel;
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks mount and cancels any active or saved recording when this local comment box unmounts
++  useEffect(() => {
++    mounted.current = true;
++    return () => {
++      mounted.current = false;
++      cancelVoiceOnUnmount.current();
++    };
++  }, []);
+   const voicePresentation = resolveVoiceComposerPresentation(
+     voiceInput.state,
+     voiceInput.elapsedSeconds,
+@@ -89,7 +103,10 @@ export function IssueCommentComposer(props: {
+     await editorRef.current?.flushPendingInput();
+     const submitted = latestDraft.current;
+     if (submitted.trim().length === 0) return;
+-    if ((await props.onSubmit(submitted)) && latestDraft.current === submitted) changeDraft("");
++    if ((await props.onSubmit(submitted)) && latestDraft.current === submitted) {
++      changeDraft("");
++      voiceInput.cancel();
++    }
+   };
+   const send = () => {
+     if (!canSend || sending.current) return Promise.resolve();
+@@ -136,6 +153,9 @@ export function IssueCommentComposer(props: {
+         >
+           <ComposerDictationError
+             error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
++            hasSavedRecording={voiceInput.hasSavedRecording}
++            disabled={locked}
++            onRetry={voiceInput.retry}
+             onDismiss={voiceInput.cancel}
+           />
+           {props.blocked !== null ? (
+diff --git a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
+index e878f865..442d8bce 100644
+--- a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
+@@ -554,7 +554,7 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
+   const insets = useSafeAreaInsets();
+   // Set once the save lands, so the removal guard lets the editor close.
+   const saved = useRef(false);
+-  const ownerKey = editor ? `${voiceOwnerKey}:${editor.environmentId}` : null;
++  const ownerKey = editor ? voiceOwnerKey : null;
+   const prompt = editor?.draft.prompt ?? "";
+   const [selectionState, setSelectionState] = useState<{
+     readonly ownerKey: string | null;
+@@ -579,14 +579,10 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
+     ownerKey,
+     label: editor?.draft.title.trim() || title,
+     selection,
+-    readDraftMessage: () => {
+-      const current = readEditor();
+-      if (current?.environmentId !== editor?.environmentId) return null;
+-      return current?.draft.prompt ?? null;
+-    },
++    readDraftMessage: () => readEditor()?.draft.prompt ?? null,
+     onChangeSelection: setSelection,
+     onChangeDraftMessage: (text) => {
+-      if (readEditor()?.environmentId === editor?.environmentId) setPrompt(text);
++      if (readEditor()) setPrompt(text);
+     },
+     disabled: saving,
+   });
+@@ -606,7 +602,7 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
+         text: gt("Discard changes"),
+         style: "destructive",
+         onPress: () => {
+-          if (voiceInput.isBusy) voiceInput.cancel();
++          if (voiceInput.isBusy || voiceInput.hasSavedRecording) voiceInput.cancel();
+           discardScheduledTaskEditor();
+           navigation.dispatch(data.action);
+         },
+diff --git a/apps/mobile/src/features/settings/components/ScheduledTaskPromptField.tsx b/apps/mobile/src/features/settings/components/ScheduledTaskPromptField.tsx
+index b788d829..14c75e4f 100644
+--- a/apps/mobile/src/features/settings/components/ScheduledTaskPromptField.tsx
++++ b/apps/mobile/src/features/settings/components/ScheduledTaskPromptField.tsx
+@@ -61,6 +61,9 @@ export function ScheduledTaskPromptField(props: {
+       </View>
+       <ComposerDictationError
+         error={voice.state.phase === "error" ? voice.state.error : null}
++        hasSavedRecording={voice.hasSavedRecording}
++        disabled={props.disabled}
++        onRetry={voice.retry}
+         onDismiss={voice.cancel}
+       />
+       {showsDictation ? (
+diff --git a/apps/mobile/src/features/settings/scheduled-task-editor-state.test.ts b/apps/mobile/src/features/settings/scheduled-task-editor-state.test.ts
+index 1cb656ec..f17127ad 100644
+--- a/apps/mobile/src/features/settings/scheduled-task-editor-state.test.ts
++++ b/apps/mobile/src/features/settings/scheduled-task-editor-state.test.ts
+@@ -2,6 +2,7 @@ import { EnvironmentId } from "@t3tools/contracts";
+ import { afterEach, describe, expect, it } from "vite-plus/test";
+ 
+ import { appAtomRegistry } from "../../state/atom-registry";
++import { composerDraftResetEventAtom } from "../../state/composer-draft-reset-signal";
+ import { createDraft } from "./scheduledTaskDraft";
+ import {
+   discardScheduledTaskEditor,
+@@ -58,6 +59,31 @@ describe("scheduled task voice draft", () => {
+     updateScheduledTaskEditor((current) => current, editor);
+     expect(appAtomRegistry.get(scheduledTaskEditorSessionAtom)?.current).toBeNull();
+   });
++
++  it("keeps the same voice owner key across environment changes and notifies reset on discard", () => {
++    startScheduledTaskEditor(editor);
++    const session = appAtomRegistry.get(scheduledTaskEditorSessionAtom)!;
++    const ownerKey = `scheduled-task:${session.id}`;
++    updateScheduledTaskEditor(
++      (current) =>
++        current && {
++          ...current,
++          environmentId: EnvironmentId.make("second-environment"),
++          environmentLabel: "Second",
++          draft: { ...current.draft, prompt: "kept prompt" },
++        },
++      null,
++    );
++
++    expect(readScheduledTaskEditor(ownerKey, null)?.draft.prompt).toBe("kept prompt");
++    expect(readScheduledTaskEditor(ownerKey, null)?.environmentId).toBe(
++      EnvironmentId.make("second-environment"),
++    );
++
++    discardScheduledTaskEditor();
++    expect(appAtomRegistry.get(composerDraftResetEventAtom)?.matches(ownerKey)).toBe(true);
++    expect(readScheduledTaskEditor(ownerKey, null)).toBeNull();
++  });
+ });
+ 
+ describe("new scheduled task link", () => {
+diff --git a/apps/mobile/src/features/settings/scheduled-task-editor-state.ts b/apps/mobile/src/features/settings/scheduled-task-editor-state.ts
+index d4a7ba79..d25f3e1b 100644
+--- a/apps/mobile/src/features/settings/scheduled-task-editor-state.ts
++++ b/apps/mobile/src/features/settings/scheduled-task-editor-state.ts
+@@ -5,6 +5,7 @@ import { Atom } from "effect/reactivity";
+ import { findLinkedRoute } from "../../lib/appLinking";
+ 
+ import { appAtomRegistry } from "../../state/atom-registry";
++import { notifyComposerDraftReset } from "../../state/composer-draft-reset-signal";
+ import { hasScheduledTaskDraftChanges, type ScheduledTaskDraft } from "./scheduledTaskDraft";
+ 
+ export type ScheduledTaskEditor = {
+@@ -38,7 +39,15 @@ export function scheduledTaskEditorHasChanges(
+   );
+ }
+ 
++function notifyScheduledTaskDraftReset(session: ScheduledTaskEditorSession | null): void {
++  const targetOwnerKey = `scheduled-task:${session?.id ?? 0}`;
++  notifyComposerDraftReset(
++    (ownerKey) => ownerKey === targetOwnerKey || ownerKey.startsWith(`${targetOwnerKey}:`),
++  );
++}
++
+ export function startScheduledTaskEditor(next: ScheduledTaskEditor | null): void {
++  const previous = appAtomRegistry.get(scheduledTaskEditorSessionAtom);
+   newTaskLinkAwaitsDiscard = false;
+   appAtomRegistry.set(scheduledTaskEditorSessionAtom, {
+     id: ++nextEditorId,
+@@ -46,6 +55,7 @@ export function startScheduledTaskEditor(next: ScheduledTaskEditor | null): void
+     current: next,
+     saving: false,
+   });
++  notifyScheduledTaskDraftReset(previous);
+ }
+ 
+ export function updateScheduledTaskEditor(
+@@ -89,6 +99,7 @@ export function markScheduledTaskEditorSaved(): void {
+   if (session) {
+     appAtomRegistry.set(scheduledTaskEditorSessionAtom, { ...session, initial: session.current });
+   }
++  notifyScheduledTaskDraftReset(session);
+ }
+ 
+ export function readScheduledTaskEditor(
+@@ -116,6 +127,7 @@ export function takeScheduledTaskNewLink(
+       newTaskLinkAwaitsDiscard = true;
+     } else {
+       appAtomRegistry.set(scheduledTaskEditorSessionAtom, null);
++      notifyScheduledTaskDraftReset(session);
+     }
+   }
+   return state;
+@@ -124,8 +136,10 @@ export function takeScheduledTaskNewLink(
+ /** Drops unsaved changes; a new-task link that waited on them then opens a fresh editor. */
+ export function discardScheduledTaskEditor(): void {
+   if (newTaskLinkAwaitsDiscard) {
++    const previous = appAtomRegistry.get(scheduledTaskEditorSessionAtom);
+     newTaskLinkAwaitsDiscard = false;
+     appAtomRegistry.set(scheduledTaskEditorSessionAtom, null);
++    notifyScheduledTaskDraftReset(previous);
+     return;
+   }
+   startScheduledTaskEditor(null);
+diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+index 1087b68c..65b7f614 100644
+--- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
++++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+@@ -40,7 +40,13 @@ import {
+   ComposerDictationToolbar,
+ } from "../voice-input/ComposerDictationControl";
+ import { useVoiceInputController } from "../voice-input/useVoiceInputController";
++import { voiceGrantAtom } from "../voice-input/voiceDestination";
+ import { resolveVoiceComposerPresentation } from "../voice-input/voiceInputPresentation";
++import {
++  readPendingUserInputCustomAnswer,
++  retainPendingUserInputRequests,
++  writePendingUserInputCustomAnswer,
++} from "../../state/use-selected-thread-requests";
+ 
+ export function QuestionAttachments(props: {
+   requestId: string;
+@@ -102,10 +108,41 @@ export function QuestionAttachments(props: {
+         : null,
+     label: props.question.header,
+     selection,
+-    // An unmounted answer field takes no transcript.
+-    readDraftMessage: () => (pickerScope.current.active ? nativeText.current : null),
++    // While mounted, the native input owns the text. For environment dictation, keep reading
++    // and writing the pending saved draft when unmounted so floating-pill "Send again" works.
++    // On-device and cloud dictation keep dropping transcripts after unmount.
++    readDraftMessage: () => {
++      if (pickerScope.current.active) return nativeText.current;
++      if (
++        !selectedThread ||
++        appAtomRegistry.get(voiceGrantAtom)?.destination.kind !== "environment"
++      ) {
++        return null;
++      }
++      return readPendingUserInputCustomAnswer(
++        selectedThread.environmentId,
++        selectedThread.id,
++        props.requestId,
++        props.question.id,
++      );
++    },
+     onChangeDraftMessage: (text) => {
+-      if (!pickerScope.current.active) return;
++      if (!pickerScope.current.active) {
++        if (
++          !selectedThread ||
++          appAtomRegistry.get(voiceGrantAtom)?.destination.kind !== "environment"
++        ) {
++          return;
++        }
++        writePendingUserInputCustomAnswer(
++          selectedThread.environmentId,
++          selectedThread.id,
++          props.requestId,
++          props.question.id,
++          text,
++        );
++        return;
++      }
+       // The remount drops the old input with no blur event, so release keyboard ownership here.
+       if (focusedRef.current) {
+         focusedRef.current = false;
+@@ -118,6 +155,10 @@ export function QuestionAttachments(props: {
+     },
+     onChangeSelection: setSelection,
+     disabled: props.disabled,
++    retainWhileActive: () =>
++      selectedThread && appAtomRegistry.get(voiceGrantAtom)?.destination.kind === "environment"
++        ? retainPendingUserInputRequests(selectedThread.environmentId, selectedThread.id)
++        : () => {},
+   });
+   const voicePresentation = resolveVoiceComposerPresentation(voice.state, voice.elapsedSeconds);
+   const showsDictation = voicePresentation.statusKind === "active";
+@@ -321,6 +362,9 @@ export function QuestionAttachments(props: {
+       </View>
+       <ComposerDictationError
+         error={voice.state.phase === "error" ? voice.state.error : null}
++        hasSavedRecording={voice.hasSavedRecording}
++        disabled={props.disabled}
++        onRetry={voice.retry}
+         onDismiss={voice.cancel}
+       />
+     </View>
+diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
+index eea8a457..c6c321a1 100644
+--- a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
++++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
+@@ -9,11 +9,20 @@ type VoiceInput = {
+   readonly readDraftMessage: () => string | null;
+   readonly selection: { start: number; end: number };
+   readonly onChangeDraftMessage: (text: string) => void;
++  readonly retainWhileActive?: () => () => void;
+ };
+ 
+ const harness = vi.hoisted(() => ({
+   voice: null as VoiceInput | null,
+   started: 0,
++  retried: 0,
++  cancelled: 0,
++  hasSavedRecording: false,
++  error: null as string | null,
++  grant: null as { readonly destination: { readonly kind: "environment" | "cloud" } } | null,
++  pendingDraft: null as string | null,
++  pendingWrites: [] as string[],
++  retainedCount: 0,
+ }));
+ 
+ type Children = { children?: ReactNode };
+@@ -68,7 +77,14 @@ vi.mock("../../state/use-thread-selection", () => ({
+   useThreadSelection: () => ({ selectedThread: { environmentId: "env-1", id: "thread-1" } }),
+ }));
+ vi.mock("../../state/entities", () => ({ useServerConfigs: () => new Map() }));
+-vi.mock("../../state/atom-registry", () => ({ appAtomRegistry: { get: () => ({}) } }));
++vi.mock("../../state/atom-registry", () => ({
++  appAtomRegistry: {
++    get: (atom: unknown) => (atom === "voiceGrantAtom" ? harness.grant : {}),
++  },
++}));
++vi.mock("../voice-input/voiceDestination", () => ({
++  voiceGrantAtom: "voiceGrantAtom",
++}));
+ vi.mock("../../state/use-composer-drafts", () => ({
+   composerDraftsAtom: {},
+   appendComposerDraftAttachments: () => 0,
+@@ -77,6 +93,27 @@ vi.mock("../../state/use-composer-drafts", () => ({
+ vi.mock("../../state/question-attachments", () => ({
+   questionAttachmentDraftKey: (...parts: string[]) => parts.join(":"),
+ }));
++vi.mock("../../state/use-selected-thread-requests", () => ({
++  retainPendingUserInputRequests: () => {
++    harness.retainedCount += 1;
++    return () => {
++      harness.retainedCount -= 1;
++    };
++  },
++  readPendingUserInputCustomAnswer: () => harness.pendingDraft,
++  writePendingUserInputCustomAnswer: (
++    _environmentId: string,
++    _threadId: string,
++    _requestId: string,
++    _questionId: string,
++    text: string,
++  ) => {
++    if (harness.pendingDraft === null) return false;
++    harness.pendingDraft = text;
++    harness.pendingWrites.push(text);
++    return true;
++  },
++}));
+ vi.mock("../../state/question-attachment-preparation", () => ({
+   pickQuestionAttachments: async () => ({ rejected: 0 }),
+   startQuestionImagePreparation: () => ({
+@@ -93,7 +130,23 @@ vi.mock("../voice-input/ComposerDictationControl", () => ({
+       Start voice input
+     </button>
+   ),
+-  ComposerDictationError: () => null,
++  ComposerDictationError: (props: {
++    error: string | null;
++    hasSavedRecording?: boolean;
++    onRetry?: () => void;
++    onDismiss: () => void;
++  }) =>
++    props.error && props.hasSavedRecording ? (
++      <div>
++        <span>Recording saved</span>
++        <button type="button" onClick={props.onRetry}>
++          Send again
++        </button>
++        <button type="button" onClick={props.onDismiss}>
++          Discard
++        </button>
++      </div>
++    ) : null,
+   ComposerDictationToolbar: () => null,
+   ComposerDictationCancelAction: () => null,
+   ComposerDictationStatus: () => null,
+@@ -104,13 +157,22 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
+     harness.voice = input;
+     return {
+       isAvailable: true,
+-      state: { phase: "idle", error: null, errorAction: null },
++      state: harness.error
++        ? {
++            phase: "error",
++            error: harness.error,
++            errorAction: "retry",
++            ...(harness.hasSavedRecording ? { hasRetryRecording: true } : {}),
++          }
++        : { phase: "idle", error: null, errorAction: null },
++      hasSavedRecording: harness.hasSavedRecording,
+       audioLevels: { value: [] },
+       elapsedSeconds: 0,
+       freezesEditor: false,
+       start: () => harness.started++,
++      retry: () => harness.retried++,
+       stop: () => {},
+-      cancel: () => {},
++      cancel: () => harness.cancelled++,
+     };
+   },
+ }));
+@@ -239,3 +301,62 @@ it("keeps typed text when a saved answer loads later", () => {
+ 
+   screen.unmount();
+ });
++
++it("shows Recording saved with Send again and Discard for a failed form recording", () => {
++  harness.retried = 0;
++  harness.cancelled = 0;
++  harness.hasSavedRecording = true;
++  harness.error = "Connection lost.";
++  const screen = setup();
++  try {
++    const buttons = [...document.querySelectorAll("button")];
++    expect(document.body.textContent).toContain("Recording saved");
++    const sendAgain = buttons.find((button) => button.textContent === "Send again");
++    const discard = buttons.find((button) => button.textContent === "Discard");
++    expect(sendAgain).toBeTruthy();
++    expect(discard).toBeTruthy();
++    act(() => sendAgain!.click());
++    expect(harness.retried).toBe(1);
++    act(() => discard!.click());
++    expect(harness.cancelled).toBe(1);
++  } finally {
++    harness.hasSavedRecording = false;
++    harness.error = null;
++    screen.unmount();
++  }
++});
++
++it("retries into the saved answer draft when unmounted while the question is still pending on an environment route", () => {
++  harness.grant = { destination: { kind: "environment" } };
++  harness.pendingDraft = "Check ";
++  harness.pendingWrites = [];
++  harness.retainedCount = 0;
++  const screen = setup();
++  const voice = screen.voice();
++  const release = voice.retainWhileActive?.();
++  expect(harness.retainedCount).toBe(1);
++  screen.unmount();
++  try {
++    expect(voice.readDraftMessage()).toBe("Check ");
++    voice.onChangeDraftMessage("Check Selkies.");
++    expect(harness.pendingWrites).toEqual(["Check Selkies."]);
++    expect(harness.pendingDraft).toBe("Check Selkies.");
++
++    // On-device and cloud routes still drop transcripts after unmount.
++    harness.grant = { destination: { kind: "cloud" } };
++    expect(voice.readDraftMessage()).toBeNull();
++    voice.onChangeDraftMessage("Cloud late");
++    expect(harness.pendingWrites).toEqual(["Check Selkies."]);
++
++    harness.grant = null;
++    expect(voice.readDraftMessage()).toBeNull();
++    voice.onChangeDraftMessage("Local late");
++    expect(harness.pendingWrites).toEqual(["Check Selkies."]);
++  } finally {
++    release?.();
++    expect(harness.retainedCount).toBe(0);
++    harness.grant = null;
++    harness.pendingDraft = null;
++    harness.pendingWrites = [];
++  }
++});
+diff --git a/apps/mobile/src/features/threads/ThreadComposer.tsx b/apps/mobile/src/features/threads/ThreadComposer.tsx
+index b2ebef9a..31c7b24a 100644
+--- a/apps/mobile/src/features/threads/ThreadComposer.tsx
++++ b/apps/mobile/src/features/threads/ThreadComposer.tsx
+@@ -806,6 +806,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
+         >
+           <ComposerDictationError
+             error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
++            hasSavedRecording={voiceInput.hasSavedRecording}
++            disabled={isSubmissionLocked}
++            onRetry={voiceInput.retry}
+             onDismiss={voiceInput.cancel}
+           />
+           {isExpanded ? editingAttachments : null}
+diff --git a/apps/mobile/src/features/voice-input/ComposerDictationControl.tsx b/apps/mobile/src/features/voice-input/ComposerDictationControl.tsx
+index 6119137e..05c8b85e 100644
+--- a/apps/mobile/src/features/voice-input/ComposerDictationControl.tsx
++++ b/apps/mobile/src/features/voice-input/ComposerDictationControl.tsx
+@@ -322,10 +322,50 @@ function VoiceActionButton(props: {
+ 
+ export function ComposerDictationError(props: {
+   readonly error: string | null;
++  readonly hasSavedRecording?: boolean;
++  readonly disabled?: boolean;
++  readonly onRetry?: () => void;
+   readonly onDismiss: () => void;
+ }) {
+   const gt = useGT();
+   if (!props.error) return null;
++  if (props.hasSavedRecording && props.onRetry) {
++    const savedLabel = gt("Recording saved");
++    return (
++      <View className="min-w-0 gap-2 px-4 py-3">
++        <View className="min-w-0 gap-0.5">
++          <Text accessibilityRole="alert" className="text-sm font-t3-medium text-foreground">
++            {savedLabel}
++          </Text>
++          {props.error !== savedLabel ? (
++            <Text className="text-xs text-foreground-muted">{props.error}</Text>
++          ) : null}
++        </View>
++        <View className="flex-row items-center gap-2">
++          <Pressable
++            accessibilityLabel={gt("Send again")}
++            accessibilityRole="button"
++            className="min-h-8 items-center justify-center rounded-full bg-primary px-3 py-1.5 active:opacity-70"
++            disabled={props.disabled}
++            onPress={props.onRetry}
++            style={{ opacity: props.disabled ? 0.4 : 1 }}
++          >
++            <Text className="text-xs font-t3-medium text-primary-foreground">
++              {gt("Send again")}
++            </Text>
++          </Pressable>
++          <Pressable
++            accessibilityLabel={gt("Discard")}
++            accessibilityRole="button"
++            className="min-h-8 items-center justify-center rounded-full border border-border px-3 py-1.5 active:opacity-70"
++            onPress={props.onDismiss}
++          >
++            <Text className="text-xs font-t3-medium text-foreground-muted">{gt("Discard")}</Text>
++          </Pressable>
++        </View>
++      </View>
++    );
++  }
+   return (
+     <View className="min-w-0 flex-row items-center gap-2 px-4 py-3">
+       <Text accessibilityRole="alert" className="min-w-0 flex-1 text-sm text-danger-foreground">
+@@ -448,6 +488,7 @@ export function ComposerDictationStartAction(props: {
+ }) {
+   const gt = useGT();
+   if (!props.isAvailable) return null;
++  if (props.state.phase === "error" && props.state.hasRetryRecording) return null;
+   const openSettings = props.state.phase === "error" && props.state.errorAction === "settings";
+   return (
+     <VoiceActionButton
+diff --git a/apps/mobile/src/features/voice-input/GlobalVoiceInputControl.tsx b/apps/mobile/src/features/voice-input/GlobalVoiceInputControl.tsx
+index 64d6fccf..129aba0b 100644
+--- a/apps/mobile/src/features/voice-input/GlobalVoiceInputControl.tsx
++++ b/apps/mobile/src/features/voice-input/GlobalVoiceInputControl.tsx
+@@ -103,6 +103,7 @@ function EdgeDictationPill(props: {
+   );
+   const phase = voice.state.phase;
+   const isError = phase === "error";
++  const hasSavedRecording = isError && voice.state.hasRetryRecording === true;
+   const openSettings = isError && voice.state.errorAction === "settings";
+   const label = voice.label ?? gt("Draft", { $context: "noun, the draft being dictated into" });
+ 
+@@ -162,7 +163,11 @@ function EdgeDictationPill(props: {
+           >
+             <Pressable
+               accessibilityLabel={
+-                isError ? gt("Dismiss voice input error") : gt("Cancel dictation")
++                hasSavedRecording
++                  ? gt("Discard")
++                  : isError
++                    ? gt("Dismiss voice input error")
++                    : gt("Cancel dictation")
+               }
+               accessibilityRole="button"
+               className="size-[30px] items-center justify-center active:opacity-70"
+@@ -176,7 +181,13 @@ function EdgeDictationPill(props: {
+               />
+             </Pressable>
+             <Pressable
+-              accessibilityLabel={isError ? (presentation.statusLabel ?? label) : label}
++              accessibilityLabel={
++                hasSavedRecording
++                  ? gt("Recording saved")
++                  : isError
++                    ? (presentation.statusLabel ?? label)
++                    : label
++              }
+               accessibilityHint={gt("Hides dictation controls")}
+               accessibilityRole="button"
+               className="min-w-0 flex-1 justify-center self-stretch active:opacity-70"
+@@ -185,11 +196,19 @@ function EdgeDictationPill(props: {
+               <Text
+                 className={cn(
+                   "text-xs",
+-                  isError ? "text-danger-foreground" : "font-t3-medium text-foreground",
++                  hasSavedRecording
++                    ? "font-t3-medium text-foreground"
++                    : isError
++                      ? "text-danger-foreground"
++                      : "font-t3-medium text-foreground",
+                 )}
+                 numberOfLines={1}
+               >
+-                {isError ? presentation.statusLabel : label}
++                {hasSavedRecording
++                  ? gt("Recording saved")
++                  : isError
++                    ? presentation.statusLabel
++                    : label}
+               </Text>
+             </Pressable>
+             {phase === "recording" ? (
+@@ -217,10 +236,14 @@ function EdgeDictationPill(props: {
+                 </Pressable>
+               </>
+             ) : isError ? (
+-              voice.isAvailable ? (
++              voice.isAvailable || hasSavedRecording ? (
+                 <Pressable
+                   accessibilityLabel={
+-                    openSettings ? gt("Open microphone settings") : gt("Retry dictation")
++                    openSettings
++                      ? gt("Open microphone settings")
++                      : hasSavedRecording
++                        ? gt("Send again")
++                        : gt("Retry dictation")
+                   }
+                   accessibilityRole="button"
+                   className="size-[30px] items-center justify-center active:opacity-70"
+@@ -233,7 +256,11 @@ function EdgeDictationPill(props: {
+                     void Linking.openSettings();
+                   }}
+                 >
+-                  <SymbolView name="mic" size={16} tintColorClassName="accent-icon" />
++                  <SymbolView
++                    name={hasSavedRecording ? "arrow.clockwise" : "mic"}
++                    size={16}
++                    tintColorClassName="accent-icon"
++                  />
+                 </Pressable>
+               ) : null
+             ) : (
+diff --git a/apps/mobile/src/features/voice-input/VoiceInputProvider.test.ts b/apps/mobile/src/features/voice-input/VoiceInputProvider.test.ts
+index 6e5a83de..061a2ade 100644
+--- a/apps/mobile/src/features/voice-input/VoiceInputProvider.test.ts
++++ b/apps/mobile/src/features/voice-input/VoiceInputProvider.test.ts
+@@ -7,9 +7,16 @@ vi.mock("react-native", () => ({
+ }));
+ vi.mock("react-native-reanimated", () => ({ makeMutable: () => ({ set() {} }) }));
+ vi.mock("../showcase/nativeShowcaseScene", () => ({ getNativeShowcaseScene: () => null }));
++const deletedFiles = vi.hoisted(() => [] as string[]);
+ vi.mock("expo-file-system", () => ({
+   File: class {
+-    delete() {}
++    readonly uri: string;
++    constructor(uri: string) {
++      this.uri = uri;
++    }
++    delete() {
++      deletedFiles.push(this.uri);
++    }
+   },
+ }));
+ vi.mock("expo-keep-awake", () => ({
+@@ -31,13 +38,20 @@ vi.mock("../../state/preferences", async () => {
+ });
+ vi.mock("./voiceDestination", async () => {
+   const { Atom } = await import("effect/reactivity");
+-  return { voiceRouteAtom: Atom.make(null) };
++  return {
++    voiceGrantAtom: Atom.make(null),
++    voiceRouteAtom: Atom.make(null),
++    postProcessVoiceTranscript: () => null,
++  };
+ });
+ 
+ import { setAudioModeAsync } from "expo-audio";
+ import type { MicrophoneEntry } from "../../lib/microphonePriority";
+ import { createVoiceRecorder } from "../../native/voiceRecorder";
++import { appAtomRegistry } from "../../state/atom-registry";
++import { notifyComposerDraftReset } from "../../state/composer-draft-reset-signal";
+ import { mobilePreferencesAtom } from "../../state/preferences";
++import { voiceGrantAtom, voiceRouteAtom } from "./voiceDestination";
+ import { localVoiceTranscriberAtom, voiceInputAtom } from "./VoiceInputProvider";
+ import { createVoiceInputTarget } from "./voiceInputSession";
+ 
+@@ -106,3 +120,130 @@ it("uses the loaded microphone order when recording starts before preferences hy
+     registry.dispose();
+   }
+ });
++
++it("keeps a failed recording across reconnects, and deletes it on draft reset or destination change", async () => {
++  deletedFiles.length = 0;
++  const grantAtom = voiceGrantAtom as unknown as Atom.Writable<unknown, unknown>;
++  const routeAtom = voiceRouteAtom as unknown as Atom.Writable<unknown, unknown>;
++  const preferences = mobilePreferencesAtom as Atom.Writable<
++    AsyncResult.AsyncResult<{ microphones: ReadonlyArray<MicrophoneEntry> }>,
++    AsyncResult.AsyncResult<{ microphones: ReadonlyArray<MicrophoneEntry> }>
++  >;
++  appAtomRegistry.set(preferences, AsyncResult.success({ microphones: [] }));
++  const transcribe = vi
++    .fn()
++    .mockRejectedValueOnce(new Error("Connection lost"))
++    .mockResolvedValueOnce("sent after reconnect");
++  const makeRecorder = () => ({
++    uri: "file:///saved.m4a",
++    prepareToRecordAsync: async () => {},
++    record() {},
++    stop: async () => {},
++    getStatus: () => ({
++      canRecord: true,
++      isRecording: false,
++      durationMillis: 0,
++      fileSize: 0,
++      mediaServicesDidReset: false,
++      url: null,
++    }),
++    addListener: () => ({ remove() {} }),
++    getAvailableInputs: () => [],
++    setInput() {},
++    release() {},
++  });
++  vi.mocked(createVoiceRecorder, { partial: true }).mockReturnValue(makeRecorder());
++  const audioModule = (await import("expo-audio")).AudioModule as unknown as {
++    AudioRecorder?: new () => ReturnType<typeof makeRecorder>;
++  };
++  audioModule.AudioRecorder = class {
++    constructor() {
++      return makeRecorder();
++    }
++  } as unknown as new () => ReturnType<typeof makeRecorder>;
++
++  const transcriber = {
++    prepare: async () => ({
++      locale: "en-US",
++      preflightOnly: true,
++      start: async () => null,
++      transcribe,
++    }),
++  };
++  appAtomRegistry.set(grantAtom, {
++    id: "grant-1",
++    destination: { kind: "environment", environmentId: "env-1" },
++  });
++  appAtomRegistry.set(routeAtom, { transcriber });
++  const unmount = appAtomRegistry.mount(voiceInputAtom);
++  const { session } = appAtomRegistry.get(voiceInputAtom);
++  const commit = vi.fn();
++  try {
++    await session.start(
++      createVoiceInputTarget("env-1:thread-1", () => "", commit, { start: 0, end: 0 }),
++    );
++    await session.controller.stop();
++    expect(session.controller.currentState).toMatchObject({
++      phase: "error",
++      hasRetryRecording: true,
++    });
++    expect(deletedFiles).toEqual([]);
++
++    // Reconnect updates voiceRouteAtom without changing voiceGrantAtom: file stays saved.
++    appAtomRegistry.set(routeAtom, { transcriber: null });
++    appAtomRegistry.set(routeAtom, { transcriber });
++    expect(session.controller.currentState.hasRetryRecording).toBe(true);
++    expect(deletedFiles).toEqual([]);
++
++    // Reset of a different draft leaves this draft's recording alone.
++    notifyComposerDraftReset("env-1:thread-2");
++    expect(session.controller.currentState.hasRetryRecording).toBe(true);
++    expect(deletedFiles).toEqual([]);
++
++    // Reset of the same draft deletes the file, even when the draft was already empty.
++    notifyComposerDraftReset("env-1:thread-1");
++    expect(session.controller.currentState.phase).toBe("idle");
++    expect(deletedFiles).toEqual(["file:///saved.m4a"]);
++
++    // Destination change deletes a saved recording as well.
++    deletedFiles.length = 0;
++    transcribe.mockReset();
++    transcribe.mockRejectedValueOnce(new Error("Connection lost"));
++    await session.start(
++      createVoiceInputTarget("env-1:thread-1", () => "", commit, { start: 0, end: 0 }),
++    );
++    await session.controller.stop();
++    expect(session.controller.currentState.hasRetryRecording).toBe(true);
++    appAtomRegistry.set(grantAtom, null);
++    expect(session.controller.currentState.phase).toBe("idle");
++    expect(deletedFiles).toEqual(["file:///saved.m4a"]);
++
++    // Cloud destinations keep their original behavior: failed uploads delete the file and route changes cancel.
++    deletedFiles.length = 0;
++    transcribe.mockReset();
++    transcribe.mockRejectedValueOnce(new Error("cloud error"));
++    appAtomRegistry.set(grantAtom, {
++      id: "grant-cloud",
++      destination: { kind: "cloud", environmentId: "env-1", provider: "openai" },
++    });
++    appAtomRegistry.set(routeAtom, {
++      transcriber: {
++        prepare: async () => ({
++          locale: "en-US",
++          start: async () => null,
++          transcribe,
++        }),
++      },
++    });
++    await session.start(
++      createVoiceInputTarget("env-1:thread-1", () => "", commit, { start: 0, end: 0 }),
++    );
++    await session.controller.stop();
++    expect(session.controller.currentState.hasRetryRecording).toBeUndefined();
++    expect(deletedFiles).toEqual(["file:///saved.m4a"]);
++  } finally {
++    session.controller.cancel();
++    unmount();
++    appAtomRegistry.reset();
++  }
++});
+diff --git a/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx b/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx
+index b92aa0d2..f8f6e5fe 100644
+--- a/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx
++++ b/apps/mobile/src/features/voice-input/VoiceInputProvider.tsx
+@@ -27,7 +27,8 @@ import { createLazyVoiceRecorder } from "./lazyVoiceRecorder";
+ import { VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
+ import { VoiceInputSession } from "./voiceInputSession";
+ import { createVoiceRecordingPermission } from "./voiceRecordingPermission";
+-import { postProcessVoiceTranscript, voiceRouteAtom } from "./voiceDestination";
++import { postProcessVoiceTranscript, voiceGrantAtom, voiceRouteAtom } from "./voiceDestination";
++import { composerDraftResetEventAtom } from "../../state/composer-draft-reset-signal";
+ import { makePermissionStatusAtom } from "../../lib/permissionStatusAtom";
+ import {
+   acquireAudioSession,
+@@ -119,6 +120,7 @@ export const voiceInputAtom = Atom.make((get) => {
+     },
+   });
+   const session: VoiceInputSession = new VoiceInputSession({
++    retryFailedRecording: () => registry.get(voiceGrantAtom)?.destination.kind === "environment",
+     recorder,
+     postProcess: postProcessVoiceTranscript,
+     getTranscriber: () => {
+@@ -165,7 +167,19 @@ export const voiceInputAtom = Atom.make((get) => {
+     publishAudioLevels: (levels) => audioLevels.set(levels),
+     keepAwake: () => keepScreenAwake(`voice-input:${++keepAwakeSequence}`),
+   });
+-  get.subscribe(voiceRouteAtom, () => session.controller.cancel());
++  // Environment routes also change on reconnect, which must not discard an environment dictation.
++  // Cloud providers keep their existing behavior and cancel on route changes.
++  get.subscribe(voiceRouteAtom, () => {
++    if (registry.get(voiceGrantAtom)?.destination.kind === "cloud") {
++      session.controller.cancel();
++    }
++  });
++  get.subscribe(voiceGrantAtom, () => session.controller.cancel());
++  get.subscribe(composerDraftResetEventAtom, (event) => {
++    if (event && session.ownerKey !== null && event.matches(session.ownerKey)) {
++      session.controller.cancel();
++    }
++  });
+   get.addFinalizer(() => {
+     permission.dispose();
+     session.dispose();
+diff --git a/apps/mobile/src/features/voice-input/environmentTranscriber.test.ts b/apps/mobile/src/features/voice-input/environmentTranscriber.test.ts
+index c7e393b2..83b9d206 100644
+--- a/apps/mobile/src/features/voice-input/environmentTranscriber.test.ts
++++ b/apps/mobile/src/features/voice-input/environmentTranscriber.test.ts
+@@ -78,3 +78,33 @@ it("trims at most one second of recorder padding and rejects longer recordings",
+   );
+   expect(upload).toHaveBeenCalledOnce();
+ });
++
++it("marks preflightOnly and retries prepare after an aborted or failed preflight", async () => {
++  const prepare = vi
++    .fn<(signal: AbortSignal) => Promise<string>>()
++    .mockRejectedValueOnce(new Error("offline"))
++    .mockResolvedValueOnce("fr");
++  const upload = vi.fn(async () => "bonjour");
++  const transcriber = createEnvironmentTranscriber({
++    canSend: () => true,
++    preflightOnly: true,
++    prepare,
++    decode: async () => new Uint8Array([0, 0]),
++    upload,
++  });
++
++  const firstAbort = new AbortController();
++  const recording = await transcriber.prepare({ signal: firstAbort.signal });
++  expect(recording.preflightOnly).toBe(true);
++  await expect(
++    recording.start?.("file:///draft.m4a", { signal: firstAbort.signal }),
++  ).rejects.toThrow("offline");
++
++  const retryAbort = new AbortController();
++  await expect(
++    recording.transcribe("file:///draft.m4a", { signal: retryAbort.signal }),
++  ).resolves.toBe("bonjour");
++  expect(prepare).toHaveBeenCalledTimes(2);
++  expect(recording.locale).toBe("fr");
++  expect(upload).toHaveBeenCalledOnce();
++});
+diff --git a/apps/mobile/src/features/voice-input/environmentTranscriber.ts b/apps/mobile/src/features/voice-input/environmentTranscriber.ts
+index 3f51516d..da6dace4 100644
+--- a/apps/mobile/src/features/voice-input/environmentTranscriber.ts
++++ b/apps/mobile/src/features/voice-input/environmentTranscriber.ts
+@@ -13,6 +13,7 @@ const maxPcmBytes = pcmBytesPerSecond * VOICE_RECORDING_LIMIT_SECONDS;
+ 
+ export function createEnvironmentTranscriber(input: {
+   readonly canSend: () => boolean;
++  readonly preflightOnly?: boolean;
+   readonly prepare: (signal: AbortSignal) => Promise<string>;
+   readonly decode: (uri: string) => Promise<Uint8Array>;
+   readonly upload: (pcm: Uint8Array, signal: AbortSignal) => Promise<string>;
+@@ -30,25 +31,47 @@ export function createEnvironmentTranscriber(input: {
+     async prepare({ signal }) {
+       check(signal);
+       let locale = "auto";
+-      const ready = input.prepare(signal).then((resolved) => {
+-        check(signal);
+-        locale = resolved;
+-      });
+-      void ready.catch(() => {});
++      let readySignal: AbortSignal | null = null;
++      let readyFailed = false;
++      const runPrepare = (activeSignal: AbortSignal) => {
++        readySignal = activeSignal;
++        readyFailed = false;
++        const pending = input.prepare(activeSignal).then(
++          (resolved) => {
++            check(activeSignal);
++            locale = resolved;
++            if (ready === pending) readySignal = null;
++          },
++          (error) => {
++            if (ready === pending) {
++              readyFailed = true;
++              readySignal = null;
++            }
++            throw error;
++          },
++        );
++        void pending.catch(() => {});
++        return pending;
++      };
++      let ready = runPrepare(signal);
+       return {
++        ...(input.preflightOnly ? { preflightOnly: true } : {}),
+         get locale() {
+           return locale;
+         },
+-        async start(_uri, { signal }) {
++        async start(_uri, { signal: startSignal }) {
+           await ready;
+-          check(signal);
++          check(startSignal);
+           return null;
+         },
+-        async transcribe(uri, { signal }) {
++        async transcribe(uri, { signal: transcribeSignal }) {
++          if (readyFailed || readySignal?.aborted) {
++            ready = runPrepare(transcribeSignal);
++          }
+           await ready;
+-          check(signal);
++          check(transcribeSignal);
+           const decoded = await input.decode(uri);
+-          check(signal);
++          check(transcribeSignal);
+           if (
+             !decoded.length ||
+             decoded.length % 2 ||
+@@ -67,8 +90,8 @@ export function createEnvironmentTranscriber(input: {
+               : new Int16Array(Uint8Array.from(bytes).buffer);
+           const pcm = new Float32Array(samples.length);
+           for (let i = 0; i < samples.length; i++) pcm[i] = samples[i]! / 32768;
+-          const text = await input.upload(new Uint8Array(pcm.buffer), signal);
+-          check(signal);
++          const text = await input.upload(new Uint8Array(pcm.buffer), transcribeSignal);
++          check(transcribeSignal);
+           return text;
+         },
+       };
+diff --git a/apps/mobile/src/features/voice-input/lazyVoiceRecorder.ts b/apps/mobile/src/features/voice-input/lazyVoiceRecorder.ts
+index 48ef1075..701a70b2 100644
+--- a/apps/mobile/src/features/voice-input/lazyVoiceRecorder.ts
++++ b/apps/mobile/src/features/voice-input/lazyVoiceRecorder.ts
+@@ -19,7 +19,7 @@ export interface NativeVoiceRecorder<TStatus, TRecorderState> {
+   readonly uri: string | null;
+   prepareToRecordAsync(): Promise<void>;
+   record(options: { readonly forDuration: number }): void;
+-  stop(): Promise<void>;
++  stop(): Promise<unknown>;
+   getStatus(): TRecorderState;
+   addListener(
+     eventName: "recordingStatusUpdate",
+diff --git a/apps/mobile/src/features/voice-input/useVoiceInputController.ts b/apps/mobile/src/features/voice-input/useVoiceInputController.ts
+index e3152f36..b8adbb95 100644
+--- a/apps/mobile/src/features/voice-input/useVoiceInputController.ts
++++ b/apps/mobile/src/features/voice-input/useVoiceInputController.ts
+@@ -19,6 +19,7 @@ export function useVoiceInputController(input: {
+   readonly disabled?: boolean;
+   readonly onChangeDraftMessage: (value: string) => void;
+   readonly onChangeSelection: (selection: ComposerEditorSelection) => void;
++  readonly retainWhileActive?: () => () => void;
+ }) {
+   const global = useGlobalVoiceInput();
+   const { session } = global;
+@@ -59,20 +60,31 @@ export function useVoiceInputController(input: {
+         captured.selection,
+       ),
+       label: captured.label,
++      ...(captured.retainWhileActive ? { retainWhileActive: captured.retainWhileActive } : {}),
+     });
+   }, [session]);
++  const cancel = useCallback(() => {
++    session.cancel(latestInput.current.ownerKey);
++  }, [session]);
+   const state = global.ownerKey === input.ownerKey ? global.state : IDLE_STATE;
+   const isBusy = voiceInputBlocksSubmission(state);
++  const hasSavedRecording = state.phase === "error" && state.hasRetryRecording === true;
++  const hasGlobalSavedRecording =
++    global.state.phase === "error" && global.state.hasRetryRecording === true;
+   return {
+-    isAvailable: global.isAvailable && (!global.isBusy || global.ownerKey === input.ownerKey),
++    isAvailable:
++      global.isAvailable &&
++      ((!global.isBusy && !hasGlobalSavedRecording) || global.ownerKey === input.ownerKey),
+     state,
++    hasSavedRecording,
+     audioLevels: global.audioLevels,
+     elapsedSeconds: global.elapsedSeconds,
+     isBusy,
+     freezesEditor: isBusy,
+     blocksSubmission: isBusy,
+     start,
++    retry: start,
+     stop: global.stop,
+-    cancel: global.cancel,
++    cancel,
+   };
+ }
+diff --git a/apps/mobile/src/features/voice-input/voiceDestination.test.ts b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
+index 28a07b36..bdea9544 100644
+--- a/apps/mobile/src/features/voice-input/voiceDestination.test.ts
++++ b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
+@@ -21,6 +21,11 @@ const mocks = vi.hoisted(() => ({
+   preferencesChanged:
+     vi.fn<(preferences: { speechLanguage?: string; language?: string } | null) => void>(),
+ }));
++// null takes a host offline; each number is one established connection to it.
++const link = await vi.hoisted(async () => {
++  const { Atom } = await import("effect/reactivity");
++  return Atom.family((_id: string) => Atom.make<number | null>(0));
++});
+ vi.mock("expo", () => ({
+   requireOptionalNativeModule: () => ({ decodeRecording: async () => new Uint8Array([0, 0]) }),
+ }));
+@@ -65,14 +70,14 @@ vi.mock("../../state/presentation", () => ({
+   environmentPresentations: {
+     presentationAtom: Atom.family((id: string) => {
+       mocks.probe(id);
+-      return Atom.make({
+-        connection: { phase: id === "offline" ? "offline" : "connected" },
++      return Atom.make((get) => ({
++        connection: { phase: id === "offline" || get(link(id)) === null ? "offline" : "connected" },
+         serverConfig: {
+           environment: {
+             capabilities: { voiceTranscription: true, cloudVoiceTranscription: true },
+           },
+         },
+-      });
++      }));
+     }),
+   },
+ }));
+@@ -81,12 +86,14 @@ vi.mock("../../state/session", async () => {
+   return {
+     environmentSession: {
+       preparedConnectionValueAtom: Atom.family((environmentId: string) =>
+-        Atom.make(
+-          Option.some({
+-            environmentId,
+-            httpBaseUrl: `https://${environmentId}.test`,
+-            httpAuthorization: { _tag: "Bearer", token: "fixture" },
+-          }),
++        Atom.make((get) =>
++          get(link(environmentId)) === null
++            ? Option.none()
++            : Option.some({
++                environmentId,
++                httpBaseUrl: `https://${environmentId}.test`,
++                httpAuthorization: { _tag: "Bearer", token: "fixture" },
++              }),
+         ),
+       ),
+       sessionStateAtom: Atom.family((_id: string) => Atom.make(true)),
+@@ -95,6 +102,21 @@ vi.mock("../../state/session", async () => {
+   };
+ });
+ 
++const readyStatus = () =>
++  Response.json({
++    supported: true,
++    state: "ready",
++    modelId: "fixture",
++    model: "Fixture",
++    size: 1,
++    supportsStreaming: false,
++    supportsTranslation: false,
++    acceleration: "cpu",
++    modelUnloadTimeout: "never",
++    gpuDevices: [],
++    benchmarkTier: "cpu",
++  });
++
+ it.each(["secure store", "marker"])(
+   "revokes across restarts when writing the %s fails",
+   async (failedStore) => {
+@@ -300,3 +322,37 @@ it("keeps the recording route stable across unrelated preference updates and aut
+     appAtomRegistry.reset();
+   }
+ });
++
++it("keeps a recording sendable across a reconnect to the chosen host", async () => {
++  const unmount = appAtomRegistry.mount(voiceRouteAtom);
++  const host = EnvironmentId.make("flaky-host");
++  try {
++    chooseVoiceDestination(host);
++    mocks.fetch.mockResolvedValueOnce(readyStatus());
++    const options = { signal: new AbortController().signal };
++    const recording = await appAtomRegistry.get(voiceRouteAtom)!.transcriber!.prepare(options);
++    expect(recording.preflightOnly).toBe(true);
++    appAtomRegistry.set(link(host), null);
++    await expect(recording.transcribe("file:///voice.m4a", options)).rejects.toMatchObject({
++      code: "transcription-failed",
++      message: expect.stringContaining("Your recording is saved"),
++    });
++    appAtomRegistry.set(link(host), 1);
++    mocks.fetch.mockResolvedValueOnce(Response.json({ text: "kept" }));
++    await expect(recording.transcribe("file:///voice.m4a", options)).resolves.toBe("kept");
++
++    // Cloud providers keep their existing behavior (no preflightOnly retry slot, no reconnect reuse).
++    chooseVoiceDestination(host, "openai");
++    mocks.fetch.mockResolvedValueOnce(Response.json({ openai: true, xai: false }));
++    const cloudRecording = await appAtomRegistry.get(voiceRouteAtom)!.transcriber!.prepare(options);
++    expect(cloudRecording.preflightOnly).toBeUndefined();
++    appAtomRegistry.set(link(host), 2);
++    await expect(cloudRecording.transcribe("file:///voice.m4a", options)).rejects.toThrow(
++      "Your transcription choice changed.",
++    );
++  } finally {
++    appAtomRegistry.set(link(host), 0);
++    unmount();
++    appAtomRegistry.reset();
++  }
++});
+diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
+index 1d66bfbf..588bd09c 100644
+--- a/apps/mobile/src/features/voice-input/voiceDestination.ts
++++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
+@@ -142,7 +142,7 @@ export function runSpeech<A, E>(
+   );
+ }
+ function environmentTranscriber(
+-  prepared: PreparedConnection,
++  currentConnection: () => PreparedConnection | null,
+   canSend: () => boolean,
+   speechLanguage: string,
+   readSpeechCustomWords: () => SpeechCustomWords,
+@@ -150,9 +150,18 @@ function environmentTranscriber(
+ ) {
+   const provider = cloud?.provider;
+   const model = cloud?.provider === "openrouter" ? cloud.model : undefined;
++  // Resolved per request: a reconnect replaces the connection, and a recording
++  // made across it still belongs to the same chosen environment.
++  const connection = (message: string) => {
++    const prepared = currentConnection();
++    if (!prepared) throw new VoiceTranscriptionError({ code: "transcription-failed", message });
++    return prepared;
++  };
+   return createEnvironmentTranscriber({
+     canSend,
++    preflightOnly: provider === undefined,
+     prepare: async (signal) => {
++      const prepared = connection(m(msg("Connection lost. Try again once reconnected.")));
+       if (provider) {
+         await runSpeech(requireCloudSpeechKey(prepared, provider), signal, canSend);
+         return speechLanguage;
+@@ -187,8 +196,11 @@ function environmentTranscriber(
+         });
+       return native.decodeRecording(uri);
+     },
+-    upload: async (pcm, signal) =>
+-      (
++    upload: async (pcm, signal) => {
++      const prepared = connection(
++        m(msg("Connection lost. Your recording is saved; retry once reconnected.")),
++      );
++      return (
+         await runSpeech(
+           provider
+             ? transcribeCloudPcm(
+@@ -212,7 +224,8 @@ function environmentTranscriber(
+           signal,
+           canSend,
+         )
+-      ).text,
++      ).text;
++    },
+   });
+ }
+ 
+@@ -312,8 +325,11 @@ export const voiceRouteAtom = Atom.make((get) => {
+     transcriber:
+       connection &&
+       environmentTranscriber(
+-        connection,
+-        () => registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection,
++        cloud ? () => connection : () => registry.get(connectionAtom),
++        cloud
++          ? () =>
++              registry.get(voiceGrantAtom) === grant && registry.get(connectionAtom) === connection
++          : () => registry.get(voiceGrantAtom) === grant,
+         speechLanguage,
+         readSpeechCustomWords,
+         cloud,
+diff --git a/apps/mobile/src/features/voice-input/voiceInputSession.test.ts b/apps/mobile/src/features/voice-input/voiceInputSession.test.ts
+index bbf1ff00..50c2bef2 100644
+--- a/apps/mobile/src/features/voice-input/voiceInputSession.test.ts
++++ b/apps/mobile/src/features/voice-input/voiceInputSession.test.ts
+@@ -1,4 +1,5 @@
+ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
++import { Atom, AtomRegistry } from "effect/reactivity";
+ import type { PreparedVoiceTranscription } from "@t3tools/client-runtime/voice-input";
+ import { resetVoiceInputGlobalsForTests } from "../../../../../packages/client-runtime/src/voice-input/controller";
+ import {
+@@ -29,7 +30,12 @@ function createSession(
+   overrides?: Partial<
+     Pick<
+       VoiceInputSessionDependencies,
+-      "configureRecording" | "releaseRecording" | "sampleRecording"
++      | "configureRecording"
++      | "releaseRecording"
++      | "deleteRecording"
++      | "sampleRecording"
++      | "retryFailedRecording"
++      | "getTranscriber"
+     >
+   >,
+ ) {
+@@ -42,10 +48,12 @@ function createSession(
+     record: vi.fn(),
+     stop: vi.fn(async () => {}),
+   };
+-  const prepare = vi.fn(async (): Promise<PreparedVoiceTranscription> => ({
+-    locale: "en-US",
+-    transcribe: async () => "spoken text",
+-  }));
++  const prepare = vi.fn(
++    async (): Promise<PreparedVoiceTranscription> => ({
++      locale: "en-US",
++      transcribe: async () => "spoken text",
++    }),
++  );
+   const session = new VoiceInputSession({
+     recorder,
+     getTranscriber: () => ({ prepare }),
+@@ -402,4 +410,199 @@ describe("global voice input", () => {
+     session.setOwnerFocused("first", false);
+     expect(session.getSnapshot().focusedOwners.size).toBe(0);
+   });
++
++  it("keeps target retention mounted across a failed upload and off-screen retry, then releases on idle", async () => {
++    const registry = AtomRegistry.make();
++    const flushIdle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
++    let mounted = 0;
++    const pendingAtom = Atom.make((get) => {
++      mounted += 1;
++      get.addFinalizer(() => {
++        mounted -= 1;
++      });
++      return "pending";
++    });
++    const uiUnmount = registry.mount(pendingAtom);
++    let releaseCount = 0;
++    const transcribe = vi
++      .fn<PreparedVoiceTranscription["transcribe"]>()
++      .mockRejectedValueOnce(new Error("Connection lost"))
++      .mockResolvedValueOnce("retried answer");
++    const { session } = createSession({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe,
++        }),
++      }),
++    });
++    const commit = vi.fn();
++    try {
++      await session.start({
++        ...createVoiceInputTarget(
++          "question-1",
++          () => (mounted > 0 && registry.get(pendingAtom) === "pending" ? "Draft" : null),
++          commit,
++          { start: 5, end: 5 },
++        ),
++        retainWhileActive: () => {
++          const unmount = registry.mount(pendingAtom);
++          return () => {
++            releaseCount += 1;
++            unmount();
++          };
++        },
++      });
++      await session.controller.stop();
++      expect(session.controller.currentState.hasRetryRecording).toBe(true);
++
++      // UI unmounts when user switches threads; target retention keeps the non-keepAlive atom alive.
++      uiUnmount();
++      await flushIdle();
++      expect(mounted).toBe(1);
++      expect(releaseCount).toBe(0);
++
++      // Floating pill retry still reads the mounted atom without dropping to 0.
++      await session.retry();
++      expect(commit).toHaveBeenCalledWith("Draft retried answer", { start: 20, end: 20 });
++      expect(session.controller.currentState.phase).toBe("idle");
++      expect(releaseCount).toBe(1);
++      await flushIdle();
++      expect(mounted).toBe(0);
++    } finally {
++      session.dispose();
++      registry.dispose();
++    }
++  });
++
++  it("inserts at the end on floating retry if the draft changed after failure", async () => {
++    let draft = "one two three";
++    const transcribe = vi
++      .fn<PreparedVoiceTranscription["transcribe"]>()
++      .mockRejectedValueOnce(new Error("Connection lost"))
++      .mockResolvedValueOnce("dictated");
++    const { session } = createSession({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe,
++        }),
++      }),
++    });
++    const commit = vi.fn((text: string) => {
++      draft = text;
++    });
++    try {
++      await session.start(
++        createVoiceInputTarget("thread-1", () => draft, commit, { start: 4, end: 7 }),
++      );
++      await session.controller.stop();
++      expect(session.controller.currentState.hasRetryRecording).toBe(true);
++
++      draft = "NEW one two three";
++      await session.retry();
++      expect(commit).toHaveBeenCalledWith("NEW one two three dictated", { start: 26, end: 26 });
++    } finally {
++      session.dispose();
++    }
++  });
++
++  it("keeps the saved recording when the draft changes while upload is in flight", async () => {
++    let draft = "one two three";
++    let rejectUpload!: (error: Error) => void;
++    const firstUpload = new Promise<string>((_resolve, reject) => {
++      rejectUpload = reject;
++    });
++    const transcribe = vi
++      .fn<PreparedVoiceTranscription["transcribe"]>()
++      .mockReturnValueOnce(firstUpload)
++      .mockResolvedValueOnce("dictated");
++    const { session, recorder } = createSession({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe,
++        }),
++      }),
++    });
++    const commit = vi.fn((text: string) => {
++      draft = text;
++    });
++    try {
++      await session.start(
++        createVoiceInputTarget("thread-1", () => draft, commit, { start: 4, end: 7 }),
++      );
++      const stopping = session.controller.stop();
++      // Prompt link or external edit mutates the draft while the upload is in flight.
++      draft = "LINK one two three";
++      rejectUpload(new Error("Connection lost"));
++      await stopping;
++
++      expect(session.controller.currentState.phase).toBe("error");
++      expect(session.controller.currentState.hasRetryRecording).toBe(true);
++
++      await session.retry();
++      expect(recorder.record).toHaveBeenCalledTimes(1);
++      expect(transcribe).toHaveBeenCalledTimes(2);
++      expect(commit).toHaveBeenCalledWith("LINK one two three dictated", { start: 27, end: 27 });
++    } finally {
++      session.dispose();
++    }
++  });
++
++  it("refuses starting another draft while a saved recording awaits retry or discard", async () => {
++    const deleted: Array<string> = [];
++    const transcribe = vi
++      .fn<PreparedVoiceTranscription["transcribe"]>()
++      .mockRejectedValueOnce(new Error("Connection lost"))
++      .mockResolvedValueOnce("saved words");
++    const { session, recorder } = createSession({
++      retryFailedRecording: true,
++      deleteRecording: (uri) => deleted.push(uri),
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe,
++        }),
++      }),
++    });
++    const commitA = vi.fn();
++    const commitB = vi.fn();
++    try {
++      await session.start(
++        createVoiceInputTarget("draft-a", () => "A", commitA, { start: 1, end: 1 }),
++      );
++      await session.controller.stop();
++      expect(session.ownerKey).toBe("draft-a");
++      expect(session.controller.currentState.hasRetryRecording).toBe(true);
++
++      // Attempting to start dictation in draft B must not overwrite or delete draft A's saved file.
++      await session.start(
++        createVoiceInputTarget("draft-b", () => "B", commitB, { start: 1, end: 1 }),
++      );
++      expect(session.ownerKey).toBe("draft-a");
++      expect(session.controller.currentState.hasRetryRecording).toBe(true);
++      expect(deleted).toEqual([]);
++      expect(recorder.record).toHaveBeenCalledTimes(1);
++
++      // Draft A can still be retried and commits once, then deletes the file.
++      await session.retry();
++      expect(commitA).toHaveBeenCalledWith("A saved words", { start: 13, end: 13 });
++      expect(commitB).not.toHaveBeenCalled();
++      expect(deleted).toEqual(["file:///voice.m4a"]);
++    } finally {
++      session.dispose();
++    }
++  });
+ });
+diff --git a/apps/mobile/src/features/voice-input/voiceInputSession.ts b/apps/mobile/src/features/voice-input/voiceInputSession.ts
+index 40e233d1..f7b13533 100644
+--- a/apps/mobile/src/features/voice-input/voiceInputSession.ts
++++ b/apps/mobile/src/features/voice-input/voiceInputSession.ts
+@@ -20,6 +20,8 @@ export type VoiceInputTarget = {
+   readonly label?: string;
+   readonly readDraft: () => VoiceDraftSnapshot | null;
+   readonly commitDraft: VoiceInputControllerDependencies["commitDraft"];
++  /** Optional resource hold kept alive while this target is active or holds a saved recording. */
++  readonly retainWhileActive?: () => () => void;
+ };
+ 
+ export type VoiceInputSnapshot = {
+@@ -57,7 +59,10 @@ export function createVoiceInputTarget(
+     ownerKey,
+     readDraft: () => {
+       const text = readText();
+-      return text === null ? null : { ownerKey, text, selection };
++      if (text === null) return null;
++      const end = Math.min(selection.end, text.length);
++      const start = Math.min(selection.start, end);
++      return { ownerKey, text, selection: { start, end } };
+     },
+     commitDraft,
+   };
+@@ -82,6 +87,7 @@ export class VoiceInputSession {
+   private readonly listeners = new Set<() => void>();
+   private audioLevels = SILENT_LEVELS;
+   private releaseKeepAwake: (() => void) | null = null;
++  private releaseTargetRetention: (() => void) | null = null;
+   private meteringInterval: ReturnType<typeof setInterval> | null = null;
+ 
+   constructor(dependencies: VoiceInputSessionDependencies) {
+@@ -95,6 +101,7 @@ export class VoiceInputSession {
+         const draft = this.target?.readDraft() ?? null;
+         return draft?.text === this.startText ? draft : null;
+       },
++      hasDraft: () => (this.target?.readDraft() ?? null) !== null,
+       commitDraft: (text, selection) => this.target?.commitDraft(text, selection),
+     });
+   }
+@@ -127,11 +134,50 @@ export class VoiceInputSession {
+   }
+ 
+   retry(): Promise<void> {
+-    return this.target ? this.start(this.target) : Promise.resolve();
++    if (!this.target) return Promise.resolve();
++    const target = this.target;
++    const current = target.readDraft();
++    const retryTarget: VoiceInputTarget =
++      this.controller.currentState.hasRetryRecording &&
++      current !== null &&
++      current.text !== this.startText
++        ? {
++            ...target,
++            readDraft: () => {
++              const draft = target.readDraft();
++              if (draft === null) return null;
++              return {
++                ...draft,
++                selection: { start: draft.text.length, end: draft.text.length },
++              };
++            },
++          }
++        : target;
++    return this.startTarget(retryTarget, true);
+   }
+ 
+   start(target: VoiceInputTarget): Promise<void> {
++    return this.startTarget(target, target === this.target);
++  }
++
++  private startTarget(target: VoiceInputTarget, reuseRetention: boolean): Promise<void> {
+     if (voiceInputBlocksSubmission(this.controller.currentState)) return Promise.resolve();
++    if (
++      this.controller.currentState.phase === "error" &&
++      this.controller.currentState.hasRetryRecording &&
++      this.ownerKey !== null &&
++      this.ownerKey !== target.ownerKey
++    ) {
++      return Promise.resolve();
++    }
++    const nextRetention =
++      reuseRetention && this.releaseTargetRetention !== null
++        ? this.releaseTargetRetention
++        : (target.retainWhileActive?.() ?? null);
++    if (nextRetention !== this.releaseTargetRetention) {
++      this.releaseTargetRetention?.();
++      this.releaseTargetRetention = nextRetention;
++    }
+     this.target = target;
+     this.startText = target.readDraft()?.text ?? null;
+     return this.controller.start();
+@@ -139,6 +185,8 @@ export class VoiceInputSession {
+ 
+   dispose(): void {
+     this.controller.dispose();
++    this.releaseTargetRetention?.();
++    this.releaseTargetRetention = null;
+     this.stopRecordingActivity();
+     this.listeners.clear();
+   }
+@@ -153,6 +201,10 @@ export class VoiceInputSession {
+         elapsedSeconds = 0;
+       }
+     }
++    if (state.phase === "idle" || (state.phase === "error" && !state.hasRetryRecording)) {
++      this.releaseTargetRetention?.();
++      this.releaseTargetRetention = null;
++    }
+     this.publish({
+       ...this.snapshot,
+       state,
+diff --git a/apps/mobile/src/state/composer-draft-reset-signal.ts b/apps/mobile/src/state/composer-draft-reset-signal.ts
+new file mode 100644
+index 00000000..fa1c5254
+--- /dev/null
++++ b/apps/mobile/src/state/composer-draft-reset-signal.ts
+@@ -0,0 +1,23 @@
++import { Atom } from "effect/reactivity";
++
++import { appAtomRegistry } from "./atom-registry";
++
++export interface ComposerDraftResetEvent {
++  readonly id: number;
++  readonly matches: (ownerKey: string) => boolean;
++}
++
++let nextResetEventId = 0;
++
++/** Published whenever a draft or question form is cleared, sent, or pruned, even if empty. */
++export const composerDraftResetEventAtom = Atom.make<ComposerDraftResetEvent | null>(null).pipe(
++  Atom.withLabel("mobile:composer-draft-reset-event"),
++);
++
++export function notifyComposerDraftReset(target: string | ((ownerKey: string) => boolean)): void {
++  const matches = typeof target === "string" ? (ownerKey: string) => ownerKey === target : target;
++  appAtomRegistry.set(composerDraftResetEventAtom, {
++    id: ++nextResetEventId,
++    matches,
++  });
++}
+diff --git a/apps/mobile/src/state/use-composer-drafts.ts b/apps/mobile/src/state/use-composer-drafts.ts
+index 8bf91eaf..feb5baeb 100644
+--- a/apps/mobile/src/state/use-composer-drafts.ts
++++ b/apps/mobile/src/state/use-composer-drafts.ts
+@@ -57,6 +57,7 @@ import {
+ import type { DraftComposerAttachment, FileBackedComposerAttachment } from "../lib/composerImages";
+ import { SerializedAsyncQueue } from "../lib/serialized-async-queue";
+ import { appAtomRegistry } from "./atom-registry";
++import { notifyComposerDraftReset } from "./composer-draft-reset-signal";
+ import {
+   abortComposerDraftOperations,
+   abortComposerDraftOperationsWhere,
+@@ -122,6 +123,7 @@ function nextComposerDraftReset(): number {
+ 
+ function markComposerDraftReset(draftKey: string): void {
+   appAtomRegistry.set(composerDraftResetAtom(draftKey), nextComposerDraftReset());
++  notifyComposerDraftReset(draftKey);
+ }
+ 
+ /**
+@@ -2126,10 +2128,14 @@ export async function clearComposerDraftsEnvironment(environmentId: EnvironmentI
+     .flatMap(([, draft]) => draft.attachments);
+   // Keys with no stored draft yet (an empty thread composer) can still have a pick running.
+   const environmentPrefix = `${environmentId}:`;
++  const removedDraftKeys = new Set(
++    Object.keys(current).filter((draftKey) => next[draftKey] === undefined),
++  );
+   abortComposerDraftOperationsWhere(
+-    (draftKey) =>
+-      draftKey.startsWith(environmentPrefix) ||
+-      (current[draftKey] !== undefined && next[draftKey] === undefined),
++    (draftKey) => draftKey.startsWith(environmentPrefix) || removedDraftKeys.has(draftKey),
++  );
++  notifyComposerDraftReset(
++    (draftKey) => draftKey.startsWith(environmentPrefix) || removedDraftKeys.has(draftKey),
+   );
+ 
+   if (persistTimer !== null) {
+diff --git a/apps/mobile/src/state/use-selected-thread-requests.ts b/apps/mobile/src/state/use-selected-thread-requests.ts
+index d4e4ff14..d00e56d0 100644
+--- a/apps/mobile/src/state/use-selected-thread-requests.ts
++++ b/apps/mobile/src/state/use-selected-thread-requests.ts
+@@ -50,6 +50,7 @@ import {
+   type PendingUserInputDraftAnswer,
+ } from "@t3tools/client-runtime/state/pending-user-input";
+ import { appAtomRegistry } from "./atom-registry";
++import { notifyComposerDraftReset } from "./composer-draft-reset-signal";
+ import { useSelectedThreadPendingRequests } from "./use-thread-detail";
+ import { useThreadSelection } from "./use-thread-selection";
+ import { useAtomCommand } from "./use-atom-command";
+@@ -110,6 +111,53 @@ function setUserInputDraftCustomAnswer(
+   });
+ }
+ 
++/** Keeps a thread's pending-request atom mounted while a voice retry can target it off-screen. */
++export function retainPendingUserInputRequests(
++  environmentId: EnvironmentId,
++  threadId: ThreadId,
++): () => void {
++  return appAtomRegistry.mount(
++    environmentThreadDetails.pendingRequestsAtom({ environmentId, threadId }),
++  );
++}
++
++export function readPendingUserInputCustomAnswer(
++  environmentId: EnvironmentId,
++  threadId: ThreadId,
++  requestId: string,
++  questionId: string,
++): string | null {
++  const pending = appAtomRegistry.get(
++    environmentThreadDetails.pendingRequestsAtom({ environmentId, threadId }),
++  );
++  const question = pending?.userInputs
++    .find((entry) => entry.requestId === requestId)
++    ?.questions.find((entry) => entry.id === questionId);
++  if (!question) return null;
++  const requestKey = userInputDraftKey(environmentId, threadId, requestId);
++  const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
++  return seededDraft(current[requestKey], question)?.customAnswer ?? "";
++}
++
++export function writePendingUserInputCustomAnswer(
++  environmentId: EnvironmentId,
++  threadId: ThreadId,
++  requestId: string,
++  questionId: string,
++  customAnswer: string,
++): boolean {
++  const pending = appAtomRegistry.get(
++    environmentThreadDetails.pendingRequestsAtom({ environmentId, threadId }),
++  );
++  const question = pending?.userInputs
++    .find((entry) => entry.requestId === requestId)
++    ?.questions.find((entry) => entry.id === questionId);
++  if (!question) return false;
++  const requestKey = userInputDraftKey(environmentId, threadId, requestId);
++  setUserInputDraftCustomAnswer(requestKey, question, customAnswer);
++  return true;
++}
++
+ /** Drops a thread's answer and attachment drafts for every request outside `pendingRequestIds`. */
+ function pruneResolvedRequestDrafts(
+   environmentId: EnvironmentId,
+@@ -145,6 +193,9 @@ function pruneResolvedRequestDrafts(
+       changed = true;
+     }
+   }
++  notifyComposerDraftReset(
++    (key) => resolvedQuestionDraftKeys([key], prefix, pendingRequestIds).length > 0,
++  );
+   if (changed) appAtomRegistry.set(questionAttachmentPreparationAtom, counts);
+ }
+ 
+@@ -302,6 +353,14 @@ export function useSelectedThreadRequests() {
+       requestId,
+     );
+     setUserInputDraftOption(requestKey, question, value);
++    notifyComposerDraftReset(
++      questionAttachmentDraftKey(
++        selectedThreadShell.environmentId,
++        selectedThreadShell.id,
++        requestId,
++        question.id,
++      ),
++    );
+   };
+ 
+   const onChangeUserInputCustomAnswer = (
+diff --git a/packages/client-runtime/src/voice-input/controller.test.ts b/packages/client-runtime/src/voice-input/controller.test.ts
+index 15f5fea3..a38193a2 100644
+--- a/packages/client-runtime/src/voice-input/controller.test.ts
++++ b/packages/client-runtime/src/voice-input/controller.test.ts
+@@ -908,4 +908,339 @@ describe("VoiceInputController", () => {
+     expect(harness.recorder.record).not.toHaveBeenCalled();
+     expect(harness.controller.currentState.error).toContain("background");
+   });
++
++  it("keeps a failed batch upload when preflightOnly is set, retries once and deletes on success", async () => {
++    const start = vi.fn(async () => null);
++    const transcribe = vi
++      .fn<PreparedVoiceTranscription["transcribe"]>()
++      .mockRejectedValueOnce(new Error("upload failed"))
++      .mockRejectedValueOnce(new Error("still offline"))
++      .mockResolvedValueOnce("recovered once");
++    const harness = createHarness({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start,
++          transcribe,
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    await harness.controller.stop();
++    expect(harness.controller.currentState).toMatchObject({
++      phase: "error",
++      hasRetryRecording: true,
++    });
++    expect(harness.deleted).toEqual([]);
++
++    // A second failure keeps the file saved.
++    await harness.controller.start();
++    expect(harness.controller.currentState).toMatchObject({
++      phase: "error",
++      hasRetryRecording: true,
++    });
++    expect(harness.deleted).toEqual([]);
++
++    // Next retry succeeds, inserts once and deletes the file.
++    await harness.controller.start();
++    expect(harness.recorder.record).toHaveBeenCalledOnce();
++    expect(transcribe.mock.calls.map(([uri]) => uri)).toEqual([
++      "file:///voice.m4a",
++      "file:///voice.m4a",
++      "file:///voice.m4a",
++    ]);
++    expect(harness.commits).toEqual([
++      { text: "hello recovered once", selection: { start: 20, end: 20 } },
++    ]);
++    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
++    expect(harness.controller.currentState.phase).toBe("idle");
++  });
++
++  it("stops and keeps the partial batch recording when the app moves to the background", async () => {
++    const transcribe = vi.fn<PreparedVoiceTranscription["transcribe"]>(async () => "partial words");
++    const harness = createHarness({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe,
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    await harness.controller.appMovedToBackground();
++    expect(harness.recorder.stop).toHaveBeenCalledOnce();
++    expect(harness.deleted).toEqual([]);
++    expect(harness.controller.currentState).toMatchObject({
++      phase: "error",
++      errorCode: "interrupted",
++      hasRetryRecording: true,
++    });
++    expect(transcribe).not.toHaveBeenCalled();
++
++    await harness.controller.start();
++    expect(harness.recorder.record).toHaveBeenCalledOnce();
++    expect(transcribe).toHaveBeenCalledWith("file:///voice.m4a", expect.anything());
++    expect(harness.commits).toEqual([
++      { text: "hello partial words", selection: { start: 19, end: 19 } },
++    ]);
++    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
++  });
++
++  it("keeps live on-device recording discarding on background and upload failure", async () => {
++    const live = deferred<string>();
++    const harness = createHarness({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          start: () => live.promise,
++          transcribe: async () => "fallback",
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    const bg = harness.controller.appMovedToBackground();
++    live.reject(new Error("aborted"));
++    await bg;
++    expect(harness.controller.currentState.hasRetryRecording).toBeUndefined();
++    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
++  });
++
++  it("keeps recording on a transient preflight failure and retries on stop", async () => {
++    const transcribe = vi.fn<PreparedVoiceTranscription["transcribe"]>(async () => "sent later");
++    const harness = createHarness({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => {
++            throw new VoiceTranscriptionError({
++              code: "transcription-failed",
++              message: "Connection lost.",
++            });
++          },
++          transcribe,
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    await Promise.resolve();
++    expect(harness.controller.currentState.phase).toBe("recording");
++    await harness.controller.stop();
++    expect(harness.commits).toEqual([
++      { text: "hello sent later", selection: { start: 16, end: 16 } },
++    ]);
++  });
++
++  it("does not save a failed upload when its draft is already gone", async () => {
++    const upload = deferred<string>();
++    const harness = createHarness({
++      retryFailedRecording: true,
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe: () => upload.promise,
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    const stopping = harness.controller.stop();
++    harness.setDraft(null);
++    upload.reject(new Error("upload failed"));
++    await stopping;
++    expect(harness.controller.currentState.hasRetryRecording).toBeUndefined();
++    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
++  });
++
++  it("ignores duplicate background events while saving the recording", async () => {
++    const stopGate = deferred<void>();
++    const stop = vi.fn(() => stopGate.promise);
++    const harness = createHarness({
++      retryFailedRecording: true,
++      recorder: {
++        uri: "file:///voice.m4a",
++        prepareToRecordAsync: async () => undefined,
++        record: () => undefined,
++        stop,
++      },
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe: async () => "saved",
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    const first = harness.controller.appMovedToBackground();
++    const second = harness.controller.appMovedToBackground();
++    stopGate.resolve();
++    await Promise.all([first, second]);
++
++    expect(stop).toHaveBeenCalledTimes(1);
++    expect(harness.controller.currentState.hasRetryRecording).toBe(true);
++    expect(harness.deleted).toEqual([]);
++  });
++
++  it("does not save a backgrounded recording when native stop omits the finalized url", async () => {
++    const harness = createHarness({
++      retryFailedRecording: true,
++      recorder: {
++        uri: "file:///broken.m4a",
++        prepareToRecordAsync: async () => undefined,
++        record: () => undefined,
++        stop: async () => ({ canRecord: false, isRecording: false, durationMillis: 0 }),
++      },
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe: async () => "never",
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    await harness.controller.appMovedToBackground();
++
++    expect(harness.controller.currentState.phase).toBe("error");
++    expect(harness.controller.currentState.hasRetryRecording).toBeUndefined();
++    expect(harness.deleted).toEqual(["file:///broken.m4a"]);
++  });
++
++  it("fails cleanly without saving when native stop omits the finalized url", async () => {
++    const transcribe = vi.fn<PreparedVoiceTranscription["transcribe"]>(async () => "never");
++    const harness = createHarness({
++      retryFailedRecording: true,
++      recorder: {
++        uri: "file:///broken.m4a",
++        prepareToRecordAsync: async () => undefined,
++        record: () => undefined,
++        stop: async () => ({ canRecord: false, isRecording: false, durationMillis: 0 }),
++      },
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe,
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    await harness.controller.stop();
++
++    expect(transcribe).not.toHaveBeenCalled();
++    expect(harness.controller.currentState.errorCode).toBe("finish-failed");
++    expect(harness.controller.currentState.hasRetryRecording).toBeUndefined();
++    expect(harness.deleted).toEqual(["file:///broken.m4a"]);
++  });
++
++  it("waits for a canceled background stop to clean up before starting the next recording", async () => {
++    const firstStop = deferred<void>();
++    let uri = "file:///first.m4a";
++    const stop = vi.fn(() => (uri === "file:///first.m4a" ? firstStop.promise : Promise.resolve()));
++    const record = vi.fn(() => undefined);
++    const harness = createHarness({
++      retryFailedRecording: true,
++      recorder: {
++        get uri() {
++          return uri;
++        },
++        prepareToRecordAsync: async () => undefined,
++        record,
++        stop,
++      },
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe: async () => "second",
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    const bg = harness.controller.appMovedToBackground();
++    harness.controller.cancel();
++    expect(harness.controller.currentState.phase).toBe("idle");
++
++    // Start a second recording while the first background stop is still pending.
++    const nextStart = harness.controller.start();
++    expect(harness.controller.currentState.phase).toBe("preparing");
++    expect(record).toHaveBeenCalledTimes(1);
++
++    // Resolve the first stop; cleanup should delete only the first file and then start the second.
++    firstStop.resolve();
++    await bg;
++    uri = "file:///second.m4a";
++    await nextStart;
++
++    expect(stop).toHaveBeenCalledTimes(1);
++    expect(harness.controller.currentState.phase).toBe("recording");
++    expect(harness.deleted).toEqual(["file:///first.m4a"]);
++
++    await harness.controller.stop();
++    expect(harness.commits).toEqual([{ text: "hello second", selection: { start: 12, end: 12 } }]);
++    expect(harness.deleted).toEqual(["file:///first.m4a", "file:///second.m4a"]);
++  });
++
++  it("cancels a preparing start on a second background switch while the prior stop is pending", async () => {
++    const firstStop = deferred<void>();
++    const record = vi.fn(() => undefined);
++    const harness = createHarness({
++      retryFailedRecording: true,
++      recorder: {
++        uri: "file:///first.m4a",
++        prepareToRecordAsync: async () => undefined,
++        record,
++        stop: () => firstStop.promise,
++      },
++      getTranscriber: () => ({
++        prepare: async () => ({
++          locale: "en-US",
++          preflightOnly: true,
++          start: async () => null,
++          transcribe: async () => "never",
++        }),
++      }),
++    });
++
++    await harness.controller.start();
++    const bg1 = harness.controller.appMovedToBackground();
++    harness.controller.cancel();
++
++    const nextStart = harness.controller.start();
++    expect(harness.controller.currentState.phase).toBe("preparing");
++
++    // Second app switch while the first stop is still pending must interrupt the queued start.
++    await harness.controller.appMovedToBackground();
++    expect(harness.controller.currentState.phase).toBe("error");
++    expect(harness.controller.currentState.error).toContain("background");
++
++    firstStop.resolve();
++    await Promise.all([bg1, nextStart]);
++
++    expect(record).toHaveBeenCalledTimes(1);
++    expect(harness.controller.currentState.phase).toBe("error");
++    expect(harness.deleted).toEqual(["file:///first.m4a"]);
++  });
+ });
+diff --git a/packages/client-runtime/src/voice-input/controller.ts b/packages/client-runtime/src/voice-input/controller.ts
+index 372bfd2a..c0601fee 100644
+--- a/packages/client-runtime/src/voice-input/controller.ts
++++ b/packages/client-runtime/src/voice-input/controller.ts
+@@ -57,6 +57,7 @@ export type VoiceInputState = {
+   readonly error: string | null;
+   readonly errorAction: "retry" | "settings" | null;
+   readonly errorCode?: VoiceInputErrorCode;
++  readonly hasRetryRecording?: boolean;
+ };
+ 
+ type VoiceInputFailure = { readonly message: string; readonly code?: VoiceInputErrorCode };
+@@ -87,7 +88,7 @@ export interface VoiceRecorder {
+   readonly uri: string | null;
+   prepareToRecordAsync(signal?: AbortSignal): Promise<void>;
+   record(options: { readonly forDuration: number }): void;
+-  stop(): Promise<void>;
++  stop(): Promise<unknown>;
+ }
+ 
+ export type VoiceInputControllerDependencies = {
+@@ -101,7 +102,7 @@ export type VoiceInputControllerDependencies = {
+   readonly releaseRecording: () => Promise<void>;
+   readonly deleteRecording: (uri: string) => void;
+   /** Keep a recording whose transcription failed so the next start retries it without recording again. */
+-  readonly retryFailedRecording?: boolean;
++  readonly retryFailedRecording?: boolean | (() => boolean);
+   /**
+    * Optional cleanup of the transcript before insertion. Returning null skips it for this
+    * recording; a failure falls back to the raw transcript.
+@@ -114,6 +115,8 @@ export type VoiceInputControllerDependencies = {
+     | undefined;
+   readonly onPostProcessingError?: (error: unknown) => void;
+   readonly readDraft: () => VoiceDraftSnapshot | null;
++  /** Checks whether the draft owner still exists when deciding to keep a failed recording. */
++  readonly hasDraft?: () => boolean;
+   readonly commitDraft: (
+     text: string,
+     selection: { readonly start: number; readonly end: number },
+@@ -291,6 +294,18 @@ function transcriptionFailure(error: unknown, resolve: MFunctionType): VoiceInpu
+       };
+ }
+ 
++function readStopResult(
++  result: unknown,
++): { readonly ok: true; readonly uri: string | null } | { readonly ok: false } {
++  // Android expo-audio resolves stop() with a status object that omits `url` when MediaRecorder.stop() fails.
++  if (result === null || typeof result !== "object") {
++    return { ok: true, uri: null };
++  }
++  const url =
++    "url" in result && typeof result.url === "string" && result.url.length > 0 ? result.url : null;
++  return url ? { ok: true, uri: url } : { ok: false };
++}
++
+ const IDLE_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };
+ 
+ export class VoiceInputController {
+@@ -299,6 +314,7 @@ export class VoiceInputController {
+   private operationToken = 0;
+   private sessionToken: VoiceInputSession | null = null;
+   private transcription: PreparedVoiceTranscription | null = null;
++  private preflight: Promise<{ ok: true } | { error: unknown }> | null = null;
+   private liveTranscription: Promise<{ text: string | null } | { error: unknown }> | null = null;
+   private transcriptionAbortController: AbortController | null = null;
+   private postProcessingAbortController: AbortController | null = null;
+@@ -308,6 +324,7 @@ export class VoiceInputController {
+   private readonly ownedRecordingUris = new Set<string>();
+   private recordingConfigured = false;
+   private finishing = false;
++  private preserving: Promise<void> | null = null;
+   private retryRecording: {
+     uri: string;
+     ownerKey: string;
+@@ -322,6 +339,12 @@ export class VoiceInputController {
+     return this.dependencies.resolve ?? mFallback;
+   }
+ 
++  private get retryFailedRecording(): boolean {
++    return typeof this.dependencies.retryFailedRecording === "function"
++      ? this.dependencies.retryFailedRecording()
++      : Boolean(this.dependencies.retryFailedRecording);
++  }
++
+   private text(message: string): string {
+     return this.resolve(message);
+   }
+@@ -428,18 +451,42 @@ export class VoiceInputController {
+       if (this.transcription.start && this.recordingUri) {
+         const start = this.transcription.start;
+         const uri = this.recordingUri;
+-        this.liveTranscription = runTranscriptionOperation(() =>
+-          start(uri, { signal: abortController.signal }),
+-        ).then(
+-          (text) => ({ text }),
+-          (error: unknown) => {
+-            if (this.isCurrent(operationToken) && this.state.phase === "recording") {
+-              const failure = transcriptionFailure(error, this.resolve);
+-              void this.discardRecording(failure.message, failure.code);
+-            }
+-            return { error };
+-          },
+-        );
++        if (this.transcription.preflightOnly) {
++          this.preflight = runTranscriptionOperation(() =>
++            start(uri, { signal: abortController.signal }),
++          ).then(
++            () => ({ ok: true as const }),
++            (error: unknown) => {
++              const code = errorCode(error);
++              if (
++                this.retryFailedRecording &&
++                code !== "unavailable" &&
++                code !== "unsupported-locale" &&
++                code !== "cancelled"
++              ) {
++                return { ok: true as const };
++              }
++              if (this.isCurrent(operationToken) && this.state.phase === "recording") {
++                const failure = transcriptionFailure(error, this.resolve);
++                void this.discardRecording(failure.message, failure.code);
++              }
++              return { error };
++            },
++          );
++        } else {
++          this.liveTranscription = runTranscriptionOperation(() =>
++            start(uri, { signal: abortController.signal }),
++          ).then(
++            (text) => ({ text }),
++            (error: unknown) => {
++              if (this.isCurrent(operationToken) && this.state.phase === "recording") {
++                const failure = transcriptionFailure(error, this.resolve);
++                void this.discardRecording(failure.message, failure.code);
++              }
++              return { error };
++            },
++          );
++        }
+       }
+       this.dependencies.recorder.record({ forDuration: VOICE_RECORDING_LIMIT_SECONDS });
+       this.setState({ phase: "recording", error: null, errorAction: null });
+@@ -478,14 +525,22 @@ export class VoiceInputController {
+         this.setState(IDLE_STATE);
+         return;
+       case "preparing":
++        this.retryRecording = null;
+         this.invalidateOperation();
+         this.setState(IDLE_STATE);
+         return;
+       case "recording":
++        this.retryRecording = null;
++        if (this.finishing) {
++          this.invalidateOperation();
++          this.setState(IDLE_STATE);
++          return;
++        }
+         this.discardRecording(null);
+         return;
+       case "transcribing":
+       case "post-processing":
++        this.retryRecording = null;
+         this.invalidateOperation();
+         this.setState(IDLE_STATE);
+         return;
+@@ -514,22 +569,39 @@ export class VoiceInputController {
+       this.setFailure(failure, "retry");
+       return;
+     }
+-    if (this.state.phase !== "recording") return;
++    if (this.finishing || this.state.phase !== "recording") return;
+     this.rememberRecordingUri(completedUri);
+     this.recordingUri = completedUri ?? this.recordingUri;
+     return this.discardRecording(failure.message, failure.code);
+   }
+ 
+   appMovedToBackground(): Promise<void> | void {
+-    return this.interruptRecording(
+-      this.state.phase === "preparing"
+-        ? this.text(msg("Voice input stopped when the app moved to the background."))
+-        : undefined,
+-    );
++    if (this.state.phase === "preparing") {
++      return this.interruptRecording(
++        this.text(msg("Voice input stopped when the app moved to the background.")),
++      );
++    }
++    if (this.preserving) return this.preserving;
++    if (
++      this.state.phase === "recording" &&
++      !this.finishing &&
++      this.retryFailedRecording &&
++      this.transcription &&
++      this.capturedDraft &&
++      !this.liveTranscription &&
++      !this.transcription.streaming
++    ) {
++      return this.preserveRecording(
++        this.text(msg("Voice input stopped when the app moved to the background.")),
++        "interrupted",
++      );
++    }
++    if (this.finishing) return;
++    return this.interruptRecording();
+   }
+ 
+   handleRecorderStatus(status: VoiceRecorderStatus): Promise<void> | void {
+-    if (this.state.phase !== "recording") return;
++    if (this.finishing || this.state.phase !== "recording") return;
+     if (status.url && this.recordingUri && status.url !== this.recordingUri) return;
+     if (status.hasError) {
+       return this.interruptRecording(status.error ?? undefined, status.url);
+@@ -555,9 +627,16 @@ export class VoiceInputController {
+         this.cancel();
+         return;
+       case "recording":
++        this.retryRecording = null;
++        if (this.finishing) {
++          this.invalidateOperation();
++          this.setState(IDLE_STATE);
++          return;
++        }
+         this.discardRecording(null);
+         return;
+       default:
++        this.retryRecording = null;
+         this.invalidateOperation();
+         this.setState(IDLE_STATE);
+     }
+@@ -574,16 +653,23 @@ export class VoiceInputController {
+     this.setState({ phase: "transcribing", error: null, errorAction: null });
+ 
+     try {
+-      if (!alreadyStopped) await this.dependencies.recorder.stop();
++      let stopFailed = false;
++      let stoppedUri: string | null = null;
++      if (!alreadyStopped) {
++        const stopOutcome = readStopResult(await this.dependencies.recorder.stop());
++        stopFailed = !stopOutcome.ok;
++        stoppedUri = stopOutcome.ok ? stopOutcome.uri : null;
++      }
+       await this.releaseAudioSession();
+-      this.recordingUri = completedUri ?? this.dependencies.recorder.uri ?? this.recordingUri;
++      this.recordingUri =
++        completedUri ?? stoppedUri ?? this.dependencies.recorder.uri ?? this.recordingUri;
+       this.rememberRecordingUri(this.recordingUri);
+       if (!this.isCurrent(operationToken)) return;
+       const transcription = this.transcription;
+       const recordingUri = this.recordingUri;
+       if (
+         !transcription ||
+-        (!transcription.streaming && !recordingUri) ||
++        (!transcription.streaming && (stopFailed || !recordingUri)) ||
+         !this.transcriptionAbortController ||
+         !this.capturedDraft
+       ) {
+@@ -599,6 +685,8 @@ export class VoiceInputController {
+       const capturedDraft = this.capturedDraft;
+       let transcript: string;
+       try {
++        const preflight = this.preflight ? await this.preflight : null;
++        if (preflight && "error" in preflight) throw preflight.error;
+         const live = this.liveTranscription ? await this.liveTranscription : null;
+         if (live && "error" in live) throw live.error;
+         transcript =
+@@ -610,12 +698,17 @@ export class VoiceInputController {
+           ));
+       } catch (error) {
+         if (this.isCurrent(operationToken)) {
++          const draftExists = this.dependencies.hasDraft
++            ? this.dependencies.hasDraft()
++            : this.dependencies.readDraft() !== null;
+           if (
+-            this.dependencies.retryFailedRecording &&
++            this.retryFailedRecording &&
+             errorCode(error) !== "preparation-failed" &&
++            errorCode(error) !== "cancelled" &&
+             !this.liveTranscription &&
+             !transcription.streaming &&
+-            recordingUri
++            recordingUri &&
++            draftExists
+           ) {
+             this.retryRecording = {
+               uri: recordingUri,
+@@ -700,6 +793,53 @@ export class VoiceInputController {
+     }
+   }
+ 
++  private preserveRecording(message: string, code: VoiceInputErrorCode): Promise<void> {
++    if (this.preserving) return this.preserving;
++    if (this.finishing || this.state.phase !== "recording") return Promise.resolve();
++    const transcription = this.transcription;
++    const capturedDraft = this.capturedDraft;
++    if (!transcription || !capturedDraft) {
++      return this.discardRecording(message, code);
++    }
++    const task = (async () => {
++      this.finishing = true;
++      this.invalidateOperation();
++      const saveToken = this.operationToken;
++      try {
++        let stopped = true;
++        let stoppedUri: string | null = null;
++        try {
++          const stopOutcome = readStopResult(await this.dependencies.recorder.stop());
++          if (stopOutcome.ok) {
++            stoppedUri = stopOutcome.uri;
++          } else {
++            stopped = false;
++          }
++        } catch {
++          stopped = false;
++        }
++        await this.releaseAudioSession();
++        const candidateUri = stoppedUri ?? this.dependencies.recorder.uri ?? this.recordingUri;
++        this.rememberRecordingUri(candidateUri);
++        if (!this.isCurrent(saveToken)) return;
++        if (stopped && candidateUri) {
++          this.retryRecording = {
++            uri: candidateUri,
++            ownerKey: capturedDraft.ownerKey,
++            transcription,
++          };
++        }
++        this.setError(message, "retry", code);
++      } finally {
++        this.finishing = false;
++        this.preserving = null;
++        await this.releaseResources();
++      }
++    })();
++    this.preserving = task;
++    return task;
++  }
++
+   private async discardRecording(
+     error: string | null,
+     errorCode?: VoiceInputErrorCode,
+@@ -727,6 +867,8 @@ export class VoiceInputController {
+         await this.dependencies.recorder.stop();
+       } catch {}
+     }
++    await this.preflight;
++    this.preflight = null;
+     await this.liveTranscription;
+     this.liveTranscription = null;
+     this.recordingUri = null;
+@@ -780,11 +922,14 @@ export class VoiceInputController {
+     errorAction: VoiceInputState["errorAction"],
+     errorCode?: VoiceInputErrorCode,
+   ): void {
+-    this.setState(
+-      errorCode === undefined
+-        ? { phase: "error", error, errorAction }
+-        : { phase: "error", error, errorAction, errorCode },
+-    );
++    const hasRetryRecording = this.retryRecording !== null;
++    this.setState({
++      phase: "error",
++      error,
++      errorAction,
++      ...(errorCode === undefined ? {} : { errorCode }),
++      ...(hasRetryRecording ? { hasRetryRecording: true } : {}),
++    });
+   }
+ 
+   private setFailure(failure: VoiceInputFailure, errorAction: VoiceInputState["errorAction"]) {
+diff --git a/packages/client-runtime/src/voice-input/transcription.ts b/packages/client-runtime/src/voice-input/transcription.ts
+index 9516d526..d3c24fd1 100644
+--- a/packages/client-runtime/src/voice-input/transcription.ts
++++ b/packages/client-runtime/src/voice-input/transcription.ts
+@@ -19,6 +19,8 @@ export type PreparedVoiceTranscription = {
+    * A rejection stops the recording.
+    */
+   readonly start?: (uri: string, options: VoiceTranscriptionOptions) => Promise<string | null>;
++  /** True when `start` only checks readiness and `transcribe` still runs on the saved file. */
++  readonly preflightOnly?: boolean;
+   readonly transcribe: (uri: string, options: VoiceTranscriptionOptions) => Promise<string>;
+   /** Present when audio streams during capture; `finish` then replaces `transcribe`. */
+   readonly streaming?: VoiceStreamingSession | undefined;

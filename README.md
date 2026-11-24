@@ -9,7 +9,7 @@ decisions.
 
 - `patches.json` is the list. Upstream PRs come first, each pinned to a head
   SHA with its saved diff in `patches/upstream/`. Own patches follow, each with
-  its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 9
+  its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 10
   own patches, bug fixes only. Morgan allowed these exceptions:
   - `1448-form-free-text-mic`, the mic button in the free-text answer of a
     question form, in Shell issue 1448.
@@ -20,6 +20,10 @@ decisions.
   - `1652-pending-check-poll`, the sweep of watched pull requests every 30
     seconds while a check runs, on 2026-11-24 in
     [Shell issue 1652](https://github.com/Mgdev-25/shell/issues/1652#issuecomment-7130382638).
+  - `34-voice-retry`, keeping failed and backgrounded remote phone voice
+    recordings with Send again and Discard, on 2026-11-24 in
+    [Tasker issue 1273](https://github.com/Mgdev-25/Tasker/issues/1273#issuecomment-7132263804)
+    and [t3code-patches issue 34](https://github.com/Mgdev-25/t3code-patches/issues/34).
 - `.github/workflows/nightly.yml` runs with no model. Its cron asks for a run
   every 30 minutes, but GitHub drops most of these runs. So the Shell timer
   `patch-store-gate` on Morgan's PC also starts it for each new nightly with no

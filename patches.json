@@ -123,6 +123,15 @@
       "summary": "Sweeps watched pull requests every 30 seconds while a check runs, and every 2 minutes otherwise.",
       "check": "Watch a PR while its CI runs. The wake comes at most about 30 seconds after GitHub shows the green status, plus the read time. With no check running, the sweeps stay 2 minutes apart. Measure the median green-to-wake time over 10 PRs with watch-delay/measure.py of Shell issue 1652.",
       "dropWhen": "Upstream PullRequestWatchReactor sweeps more often than every 2 minutes while a watched pull request has a running check, or wakes on GitHub commit status events."
+    },
+    {
+      "id": "34-voice-retry",
+      "bug": 34,
+      "file": "patches/own/34-voice-retry.patch",
+      "title": "Keep failed phone voice recordings",
+      "summary": "Keeps a failed or backgrounded remote voice recording on mobile and adds Send again and Discard in the draft and form card.",
+      "check": "On the preview app with Transcribe on set to a laptop environment: cut the laptop server during upload, then tap Send again after reconnect and confirm the text enters the draft one time with no new recording; also switch apps during a recording, come back, and confirm Recording saved with Send again and Discard; confirm Discard, draft reset, and changing destination delete the file. Tracked in t3code-patches issue 34.",
+      "dropWhen": "Upstream mobile VoiceInputProvider enables retryFailedRecording, separates remote preflight from live transcription, keeps partial batch recordings on background, and shows Send again and Discard in the composer and question form."
     }
   ]
 }
