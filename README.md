@@ -18,8 +18,8 @@ decisions.
   - `1474-cleanup-fallback-model`, the fallback model of the voice cleanup,
     on 2026-11-17 in [Shell issue 1210](https://github.com/Mgdev-25/shell/issues/1210#issuecomment-6951291746).
   - `1652-pending-check-poll`, the sweep of watched pull requests every 30
-    seconds while a check runs, in
-    [Shell issue 1652](https://github.com/Mgdev-25/shell/issues/1652).
+    seconds while a check runs, on 2026-11-24 in
+    [Shell issue 1652](https://github.com/Mgdev-25/shell/issues/1652#issuecomment-7130382638).
 - `.github/workflows/nightly.yml` runs with no model. Its cron asks for a run
   every 30 minutes, but GitHub drops most of these runs. So the Shell timer
   `patch-store-gate` on Morgan's PC also starts it for each new nightly with no
