@@ -24,7 +24,7 @@ first. Then act on each fault:
   last runs. Check that the workflow is on (GitHub turns off a workflow after
   60 days with no repo activity). Turn it on and run it.
 
-Write nothing to pingdotgg/t3code. Own patches stay at most 8, bug fixes only,
+Write nothing to pingdotgg/t3code. Own patches stay at most 9, bug fixes only,
 each with its Shell issue, its check and a `dropWhen` line. The feature
 exceptions that Morgan allowed are listed in `README.md`. Rebase them like a
 bug fix, and add no other feature.
