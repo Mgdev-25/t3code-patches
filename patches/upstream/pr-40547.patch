@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-index c20afa04..23c01441 100644
+index 9534a50829..60a0be6bf0 100644
 --- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
 @@ -44,6 +44,7 @@ import {
@@ -9,8 +9,8 @@ index c20afa04..23c01441 100644
 +  extractAntigravityElicitationForm,
    extractAntigravityUserInputQuestion,
    makeAntigravityReadRepair,
-   makeAntigravityUserInputResponse,
-@@ -291,6 +292,7 @@ export function makeAntigravityAcpAdapterFlavor(
+   makeAntigravityUpdateStepsPlans,
+@@ -294,6 +295,7 @@ export function makeAntigravityAcpAdapterFlavor(
          respond: (answers) => makeAntigravityUserInputResponse(request, answers),
        };
      },
@@ -19,7 +19,7 @@ index c20afa04..23c01441 100644
      extractSubagentUpdate: extractAntigravitySubagentUpdate,
      supportsImagePrompts: true,
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.test.ts b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
-index 902ad272..0c5e9092 100644
+index 902ad272aa..0c5e9092f3 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.test.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
 @@ -4,6 +4,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
@@ -234,7 +234,7 @@ index 902ad272..0c5e9092 100644
  
  describe("Antigravity tool results", () => {
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.ts b/apps/server/src/provider/acp/AntigravityProtocol.ts
-index 0b774bc4..2d78ac71 100644
+index aedf7da7bc..ae1954caaa 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.ts
 @@ -1,7 +1,9 @@
