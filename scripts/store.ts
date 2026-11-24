@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const UPSTREAM = "pingdotgg/t3code";
-export const MAX_OWN_PATCHES = 8;
+export const MAX_OWN_PATCHES = 9;
 export const NIGHTLY_TAG = /^v(\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)$/;
 const MIGRATIONS_DIR = "apps/server/src/persistence/Migrations/";
 
