@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-index c20afa04e3..23c01441d7 100644
+index c20afa04..23c01441 100644
 --- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
 @@ -44,6 +44,7 @@ import {
@@ -19,7 +19,7 @@ index c20afa04e3..23c01441d7 100644
      extractSubagentUpdate: extractAntigravitySubagentUpdate,
      supportsImagePrompts: true,
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.test.ts b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
-index d86ca3ead0..70d370f2e0 100644
+index 902ad272..0c5e9092 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.test.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
 @@ -4,6 +4,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
@@ -234,7 +234,7 @@ index d86ca3ead0..70d370f2e0 100644
  
  describe("Antigravity tool results", () => {
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.ts b/apps/server/src/provider/acp/AntigravityProtocol.ts
-index 008579d087..146ed940e8 100644
+index 0b774bc4..2d78ac71 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.ts
 @@ -1,7 +1,9 @@
@@ -250,16 +250,16 @@ index 008579d087..146ed940e8 100644
 +  type UserInputQuestion,
  } from "@t3tools/contracts";
  import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
- import * as Option from "effect/Option";
-@@ -10,6 +12,7 @@ import * as Schema from "effect/Schema";
+ import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
+@@ -11,6 +13,7 @@ import * as Schema from "effect/Schema";
  import type * as EffectAcpSchema from "effect-acp/compat";
  import * as AcpWireSchema from "effect-acp/schema-v1";
  
 +import type { AcpAdapterV2Flavor } from "@t3tools/provider-acp/server/adapter";
- import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
- 
  import {
-@@ -184,6 +187,191 @@ export function makeAntigravityUserInputResponse(
+   extractMcpToolCallIdentity,
+   type AcpToolCallState,
+@@ -188,6 +191,191 @@ export function makeAntigravityUserInputResponse(
    return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : undefined;
  }
  

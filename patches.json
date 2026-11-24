@@ -40,14 +40,6 @@
       "file": "patches/upstream/pr-40547.patch",
       "title": "Antigravity question forms",
       "summary": "Folds single- and multi-select Antigravity ask_question choices with their Other field and orders them numerically."
-    },
-    {
-      "pr": 38956,
-      "head": "a454f48db8a9ec9552d54a7df3ef48bace3a45a7",
-      "bug": 1626,
-      "file": "patches/upstream/pr-38956.patch",
-      "title": "Antigravity send_to_user messages",
-      "summary": "Renders Antigravity send_to_user Markdown messages and resolves Antigravity T3 MCP tool labels."
     }
   ],
   "own": [
