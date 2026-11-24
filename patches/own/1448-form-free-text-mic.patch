@@ -1,5 +1,5 @@
 diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
-index 8dcfb78747..e6baec4ea1 100644
+index 8dcfb787..e6baec4e 100644
 --- a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
 +++ b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
 @@ -9,6 +9,7 @@ import type { PendingUserInput } from "../../lib/threadActivity";
@@ -70,7 +70,7 @@ index 8dcfb78747..e6baec4ea1 100644
 +  harness.voice = { isBusy: false, ownerKey: null };
 +});
 diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
-index da4179d6dd..1ce74bb398 100644
+index 34d44a30..6e6b644a 100644
 --- a/apps/mobile/src/features/threads/PendingUserInputCard.tsx
 +++ b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
 @@ -37,6 +37,8 @@ import {
@@ -82,7 +82,7 @@ index da4179d6dd..1ce74bb398 100644
  
  export interface PendingUserInputCardProps {
    readonly environmentId: EnvironmentId;
-@@ -126,6 +128,20 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+@@ -127,6 +129,20 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
    const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
    const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
    const responseDisabled = !canRespond || isResponding;
@@ -103,7 +103,7 @@ index da4179d6dd..1ce74bb398 100644
    const setDirection = markdownProseDirection(
      props.pendingUserInput.questions
        .flatMap((question) => [
-@@ -382,7 +398,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+@@ -383,7 +399,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
          label={gt("Submit answers")}
          fullWidth
          tone={props.answers ? "primary" : "secondary"}
@@ -115,7 +115,7 @@ index da4179d6dd..1ce74bb398 100644
        />
        {props.pendingUserInput.dismissible ? (
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 176f23773a..454e2fbb71 100644
+index 176f2377..454e2fbb 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
 @@ -30,6 +30,17 @@ import {
@@ -297,7 +297,7 @@ index 176f23773a..454e2fbb71 100644
  }
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 new file mode 100644
-index 0000000000..5df500db94
+index 00000000..5df500db
 --- /dev/null
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 @@ -0,0 +1,206 @@
@@ -508,14 +508,14 @@ index 0000000000..5df500db94
 +  expect(screen.changes).toEqual([]);
 +});
 diff --git a/apps/mobile/vite.config.ts b/apps/mobile/vite.config.ts
-index 80fca082c7..e262a8d521 100644
+index 792c881c..bf0463ae 100644
 --- a/apps/mobile/vite.config.ts
 +++ b/apps/mobile/vite.config.ts
-@@ -36,6 +36,7 @@ const reactTests = [
+@@ -41,6 +41,7 @@ const reactTests = [
    "src/components/ui/FilePreviewSession.test.tsx",
    "src/features/threads/UsageLimitRecoveryCard.test.tsx",
    "src/features/threads/PendingUserInputCard.test.tsx",
 +  "src/features/threads/QuestionAttachments.voice.test.tsx",
+   "src/features/threads/HtmlRenderWebView.test.tsx",
    "src/features/threads/NewTaskDraftRouteScreen.test.tsx",
    "src/native/NativeHeaderToolbar.test.tsx",
-   "src/components/ComposerEditor.ios.test.tsx",
