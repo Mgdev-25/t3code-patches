@@ -1,5 +1,5 @@
 diff --git a/apps/mobile/src/features/issues/IssueCommentComposer.tsx b/apps/mobile/src/features/issues/IssueCommentComposer.tsx
-index 901dee46..1346a7b8 100644
+index 46082efd..50f4e218 100644
 --- a/apps/mobile/src/features/issues/IssueCommentComposer.tsx
 +++ b/apps/mobile/src/features/issues/IssueCommentComposer.tsx
 @@ -1,5 +1,5 @@
@@ -9,7 +9,7 @@ index 901dee46..1346a7b8 100644
  import { Platform, View } from "react-native";
  import Animated from "react-native-reanimated";
  
-@@ -65,17 +65,31 @@ export function IssueCommentComposer(props: {
+@@ -65,18 +65,32 @@ export function IssueCommentComposer(props: {
    const textStyle = useComposerTextStyle(bodyText);
    const chrome = useComposerChrome();
    const [focused, setFocused] = useState(false);
@@ -23,6 +23,7 @@ index 901dee46..1346a7b8 100644
 +    readDraftMessage: () => (mounted.current ? latestDraft.current : null),
      selection,
      disabled: props.blocked !== null,
+     hidden: props.blocked !== null,
 -    onChangeDraftMessage: changeDraft,
 +    onChangeDraftMessage: (text) => {
 +      if (mounted.current) changeDraft(text);
@@ -43,7 +44,7 @@ index 901dee46..1346a7b8 100644
    const voicePresentation = resolveVoiceComposerPresentation(
      voiceInput.state,
      voiceInput.elapsedSeconds,
-@@ -89,7 +103,10 @@ export function IssueCommentComposer(props: {
+@@ -90,7 +104,10 @@ export function IssueCommentComposer(props: {
      await editorRef.current?.flushPendingInput();
      const submitted = latestDraft.current;
      if (submitted.trim().length === 0) return;
@@ -55,16 +56,16 @@ index 901dee46..1346a7b8 100644
    };
    const send = () => {
      if (!canSend || sending.current) return Promise.resolve();
-@@ -136,6 +153,9 @@ export function IssueCommentComposer(props: {
-         >
-           <ComposerDictationError
-             error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
-+            hasSavedRecording={voiceInput.hasSavedRecording}
-+            disabled={locked}
-+            onRetry={voiceInput.retry}
-             onDismiss={voiceInput.cancel}
-           />
-           {props.blocked !== null ? (
+@@ -151,6 +168,9 @@ export function IssueCommentComposer(props: {
+             <>
+               <ComposerDictationError
+                 error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
++                hasSavedRecording={voiceInput.hasSavedRecording}
++                disabled={locked}
++                onRetry={voiceInput.retry}
+                 onDismiss={voiceInput.cancel}
+               />
+               <View onLayout={compactEditor.onRowLayout}>
 diff --git a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
 index e878f865..442d8bce 100644
 --- a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
@@ -492,10 +493,10 @@ index eea8a457..c6c321a1 100644
 +  }
 +});
 diff --git a/apps/mobile/src/features/threads/ThreadComposer.tsx b/apps/mobile/src/features/threads/ThreadComposer.tsx
-index b2ebef9a..31c7b24a 100644
+index d21ae90a..935aee87 100644
 --- a/apps/mobile/src/features/threads/ThreadComposer.tsx
 +++ b/apps/mobile/src/features/threads/ThreadComposer.tsx
-@@ -806,6 +806,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
+@@ -807,6 +807,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
          >
            <ComposerDictationError
              error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
@@ -1011,18 +1012,18 @@ index 48ef1075..701a70b2 100644
    addListener(
      eventName: "recordingStatusUpdate",
 diff --git a/apps/mobile/src/features/voice-input/useVoiceInputController.ts b/apps/mobile/src/features/voice-input/useVoiceInputController.ts
-index e3152f36..b8adbb95 100644
+index 98188b0b..1ab652ac 100644
 --- a/apps/mobile/src/features/voice-input/useVoiceInputController.ts
 +++ b/apps/mobile/src/features/voice-input/useVoiceInputController.ts
-@@ -19,6 +19,7 @@ export function useVoiceInputController(input: {
-   readonly disabled?: boolean;
+@@ -20,6 +20,7 @@ export function useVoiceInputController(input: {
+   readonly hidden?: boolean;
    readonly onChangeDraftMessage: (value: string) => void;
    readonly onChangeSelection: (selection: ComposerEditorSelection) => void;
 +  readonly retainWhileActive?: () => () => void;
  }) {
    const global = useGlobalVoiceInput();
    const { session } = global;
-@@ -59,20 +60,31 @@ export function useVoiceInputController(input: {
+@@ -60,20 +61,31 @@ export function useVoiceInputController(input: {
          captured.selection,
        ),
        label: captured.label,
