@@ -439,7 +439,18 @@ jobs:
       - name: Generate the Android project
         working-directory: apps/mobile
         run: |
-          npx expo prebuild --platform android --clean --no-install
+          # expo-splash-screen runs light and dark splash generation in parallel on the same
+          # @expo/image-utils cache file, so a concurrent read can see a 0-byte buffer and fail.
+          prebuild_ok=false
+          for try in 1 2 3; do
+            rm -rf .expo/web/cache
+            if npx expo prebuild --platform android --clean --no-install; then
+              prebuild_ok=true
+              break
+            fi
+            echo "expo prebuild try $try failed"
+          done
+          [ "$prebuild_ok" = true ] || { echo "::error::expo prebuild failed after 3 tries"; exit 1; }
           # Android installs an update only when the version code does not go down.
           build="${VERSION##*.}"
           sed -i -E "s/versionCode [0-9]+/versionCode $build/; s/versionName \"[^\"]*\"/versionName \"$VERSION\"/" android/app/build.gradle
