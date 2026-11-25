@@ -148,10 +148,10 @@ index 0a9b1a0f8e..237e7ded6b 100644
  
  describe("AntigravityAdapterV2 subagent reads", () => {
 diff --git a/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts b/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
-index b1c15b1396..2f1c6c3f7c 100644
+index 33b01786a8..9fc4fa1a22 100644
 --- a/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
 +++ b/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
-@@ -67,6 +67,31 @@ const STATUS_QUOTA_ERROR = Buffer.concat([
+@@ -93,6 +93,31 @@ const STATUS_QUOTA_ERROR = Buffer.concat([
      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4m42s.",
    ),
  ]);
@@ -183,7 +183,7 @@ index b1c15b1396..2f1c6c3f7c 100644
  // The model's reply quoting the agent's quota notice is an ordinary planner response.
  const QUOTED_NOTICE = Buffer.from(
    "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 1 hour.",
-@@ -162,6 +187,58 @@ describe("watchAntigravityPromptOutcome", () => {
+@@ -188,6 +213,58 @@ describe("watchAntigravityPromptOutcome", () => {
            resetAt: "1970-01-01T00:00:42.000Z",
          }),
        );
@@ -242,7 +242,7 @@ index b1c15b1396..2f1c6c3f7c 100644
        assert.deepEqual(
          yield* turn([
            [USER_INPUT, input],
-@@ -186,28 +263,36 @@ describe("watchAntigravityPromptOutcome", () => {
+@@ -212,28 +289,36 @@ describe("watchAntigravityPromptOutcome", () => {
          },
        );
        // A prompt the watchdog retired keeps an absolute reset time but drops a relative one.
@@ -251,17 +251,6 @@ index b1c15b1396..2f1c6c3f7c 100644
 -          [
 -            [USER_INPUT, input],
 -            [ERROR_MESSAGE, RATE_LIMIT_ERROR],
--          ],
--          undefined,
--          { retired: true },
--        ))?.failure.resetAt,
--        undefined,
--      );
--      assert.equal(
--        (yield* turn(
--          [
--            [USER_INPUT, input],
--            [ERROR_MESSAGE, RETIRED_QUOTA_ERROR],
 -          ],
 +      for (const error of [RATE_LIMIT_ERROR, STATUS_RATE_LIMIT_ERROR]) {
 +        assert.equal(
@@ -274,6 +263,17 @@ index b1c15b1396..2f1c6c3f7c 100644
 +            { retired: true },
 +          ))?.failure.resetAt,
            undefined,
+-          { retired: true },
+-        ))?.failure.resetAt,
+-        undefined,
+-      );
+-      assert.equal(
+-        (yield* turn(
+-          [
+-            [USER_INPUT, input],
+-            [ERROR_MESSAGE, RETIRED_QUOTA_ERROR],
+-          ],
+-          undefined,
 -          { retired: true },
 -        ))?.failure.resetAt,
 -        "2026-11-09T01:05:00.000Z",
@@ -301,20 +301,27 @@ index b1c15b1396..2f1c6c3f7c 100644
        for (const error of [NOT_FOUND_ERROR, STATUS_NOT_FOUND_ERROR]) {
          assert.deepEqual(
 diff --git a/apps/server/src/provider/acp/AntigravityTurnOutcome.ts b/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
-index 5905779472..0145a2b82c 100644
+index 32d7989353..49616409dd 100644
 --- a/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
 +++ b/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
-@@ -24,17 +24,25 @@ const MAX_ERROR_PAYLOAD_BYTES = 16_384;
+@@ -24,8 +24,10 @@ const MAX_ERROR_PAYLOAD_BYTES = 16_384;
  // stops at the next error, so each start scans its own span and the match stays linear.
  const API_ERROR =
    /Error (\d{3}), Message: ((?:(?!, Status: |Error \d{3}, Message: ).)+), Status: ([A-Z_]+|\d{3}[^,\n]*)/s;
 -// Antigravity 1.5 with a Google account writes "STATUS (code NNN): message".
 -const STATUS_ERROR = /(?<![A-Z_])([A-Z_]+) \(code (\d{3})\): (\P{Cc}+)/u;
--const QUOTA_EXHAUSTED = /\breason:QUOTA_EXHAUSTED\b/;
 +// Antigravity 1.5 with a Google account writes "STATUS (code NNN): message" in a protobuf string
 +// whose length varint (65-90, 95) can be an uppercase ASCII byte immediately before STATUS.
 +const STATUS_ERROR =
 +  /(CANCELLED|UNKNOWN|INVALID_ARGUMENT|DEADLINE_EXCEEDED|NOT_FOUND|ALREADY_EXISTS|PERMISSION_DENIED|RESOURCE_EXHAUSTED|FAILED_PRECONDITION|ABORTED|OUT_OF_RANGE|UNIMPLEMENTED|INTERNAL|UNAVAILABLE|DATA_LOSS|UNAUTHENTICATED) \(code (\d{3})\): (\P{Cc}+)/u;
+ // Newer Antigravity builds attach the HTTP JSON body (pretty-printed or compact) to the error step.
+ const ERROR_JSON_START = /\{\s*"error"\s*:/g;
+ const decodeVerificationError = Schema.decodeUnknownOption(
+@@ -49,15 +51,21 @@ const decodeVerificationErrorInfo = Schema.decodeUnknownOption(
+     ),
+   }),
+ );
+-const QUOTA_EXHAUSTED = /\breason:QUOTA_EXHAUSTED\b/;
 +const QUOTA_EXHAUSTED = /(?:"reason"\s*:\s*"QUOTA_EXHAUSTED"|\breason:QUOTA_EXHAUSTED\b)/;
  // Claude rejects a saved thinking block without a valid signature. It sits in the native
  // history, so every later prompt to that session fails the same way.
@@ -336,7 +343,7 @@ index 5905779472..0145a2b82c 100644
  // Antigravity 1.5 may state the reset only in the message: "... Resets in 4m42s.".
  const RESETS_IN = /\bResets in ((?:\d+(?:\.\d+)?(?:ns|us|µs|μs|ms|h|m|s))+)(?!\w|\.\d)/;
  const GO_DURATION_PART = /(\d+(?:\.\d+)?)(ns|us|µs|μs|ms|h|m|s)/g;
-@@ -111,18 +119,36 @@ const lastStepAfter =
+@@ -134,18 +142,36 @@ const lastStepAfter =
      };
    };
  
@@ -382,10 +389,10 @@ index 5905779472..0145a2b82c 100644
  
  // Reorders STATUS_ERROR's groups to API_ERROR's: HTTP status, message, status name.
 diff --git a/packages/provider-acp/src/server/adapter.ts b/packages/provider-acp/src/server/adapter.ts
-index 4b35e96786..06712f6ee7 100644
+index 5513a012aa..b077533243 100644
 --- a/packages/provider-acp/src/server/adapter.ts
 +++ b/packages/provider-acp/src/server/adapter.ts
-@@ -1793,6 +1793,10 @@ interface ActiveAcpTurn {
+@@ -1797,6 +1797,10 @@ interface ActiveAcpTurn {
    promptSequence: number;
    /** The turn already resent a prompt after a resumable outcome failure. */
    outcomeResumed: boolean;
@@ -396,7 +403,7 @@ index 4b35e96786..06712f6ee7 100644
    /** Clock millis just before `session/prompt` was handed to the runtime. */
    promptSentAt: number | null;
    /** Completed when an update after dispatch matches `cancelAfterPromptStarts.isStart`. */
-@@ -2481,6 +2485,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -2485,6 +2489,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            flavor.compactSession !== undefined ||
            flavor.compactViaAdvertisedCommand === true;
          const runtimeRestartRequired = yield* Ref.make(false);
@@ -409,7 +416,7 @@ index 4b35e96786..06712f6ee7 100644
          const runtimeTeardownState = yield* Ref.make<AcpRuntimeTeardownState>({ _tag: "Idle" });
          const runtimeCallbackGeneration = yield* Ref.make(0);
          const runtimeCallbackGenerationCounter = yield* Ref.make(0);
-@@ -4498,6 +4508,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -4570,6 +4580,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            incoming: AcpToolCallState,
            projectedStatus?: ProjectedToolStatus,
            rawPayload?: unknown,
@@ -417,7 +424,7 @@ index 4b35e96786..06712f6ee7 100644
          ) => Effect.Effect<void> = () => Effect.void;
  
          const markAwaitingBackgroundHydration =
-@@ -4551,6 +4562,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -4623,6 +4634,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            incoming: AcpToolCallState,
            projectedStatus?: ProjectedToolStatus,
            rawPayload?: unknown,
@@ -425,7 +432,7 @@ index 4b35e96786..06712f6ee7 100644
          ) {
            if (context.assistant.current?.sourceMessageId == null)
              yield* closeTextStream(context, "assistant");
-@@ -5183,7 +5195,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -5255,7 +5267,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
              }
            }
            yield* emitProviderEvent({ type: "turn_item.updated", driver, turnItem });
@@ -436,7 +443,7 @@ index 4b35e96786..06712f6ee7 100644
          });
  
          /**
-@@ -8199,6 +8213,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -8241,6 +8255,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            ) {
              rememberTerminalEnvironment(candidate.sessionId, yield* readMcpContext(threadId));
              yield* Ref.set(runtimeRestartRequired, false);
@@ -444,7 +451,7 @@ index 4b35e96786..06712f6ee7 100644
              yield* Ref.set(activeSessionId, candidate.sessionId);
              yield* setActiveSessionSetup(candidate);
              yield* Ref.set(activeSelection, null);
-@@ -8251,6 +8266,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -8293,6 +8308,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                });
                itemIdentityVersion = 2;
                yield* Ref.set(runtimeRestartRequired, false);
@@ -452,7 +459,7 @@ index 4b35e96786..06712f6ee7 100644
                prepareClaimableTerminalEnvironment(yield* readMcpContext(input.threadId));
                return yield* startAcpRuntime(input.threadId);
              });
-@@ -8755,7 +8771,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -8797,7 +8813,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
              if (!acpCompletedTurnShouldTerminalizeTool(tool, { ...flavor, extractSubagentUpdate }))
                continue;
              if (options?.unstartedOnly === true && tool.status !== "pending") continue;
@@ -461,7 +468,7 @@ index 4b35e96786..06712f6ee7 100644
            }
          });
  
-@@ -9010,6 +9026,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9052,6 +9068,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                });
              }
            }
@@ -480,7 +487,7 @@ index 4b35e96786..06712f6ee7 100644
            yield* Ref.set(activeTurn, null);
            if (settledStatus === "completed" && !directStopQuarantine) {
              yield* detachBackgroundCommands(context);
-@@ -9041,6 +9069,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9083,6 +9111,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            if (hasDeferredBackgroundWork(context)) return;
            context.backgroundFinalizeGeneration += 1;
            const generation = context.backgroundFinalizeGeneration;
@@ -488,7 +495,7 @@ index 4b35e96786..06712f6ee7 100644
            const replyOpen = context.replyOpen;
            const debounce = replyOpen ? ACP_OPEN_REPLY_QUIET_LIMIT : ACP_DEFERRED_FINALIZE_DEBOUNCE;
            yield* Effect.gen(function* () {
-@@ -9061,7 +9090,28 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9103,7 +9132,28 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                yield* scheduleDeferredFinalize(context);
                return;
              }
@@ -517,7 +524,7 @@ index 4b35e96786..06712f6ee7 100644
              yield* finalizeTurn(context, status);
            }).pipe(Effect.forkIn(sessionScope), Effect.asVoid);
            yield* options.testHooks?.onDeferredFinalizeScheduled?.(debounce) ?? Effect.void;
-@@ -9379,6 +9429,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9421,6 +9471,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            if (!restartRequired) return false;
            yield* restartAcpRuntime(threadId);
            yield* Ref.set(runtimeRestartRequired, false);
@@ -525,7 +532,7 @@ index 4b35e96786..06712f6ee7 100644
            yield* Ref.set(activeSessionId, null);
            yield* Ref.set(activeSessionSetup, null);
            yield* resetPublishedCatalogKey;
-@@ -9901,6 +9952,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9943,6 +9994,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                foregroundIdle: yield* Deferred.make<void>(),
                promptSequence: 0,
                outcomeResumed: false,
@@ -533,7 +540,7 @@ index 4b35e96786..06712f6ee7 100644
                promptSentAt: null,
                promptStarted,
                promptUsage: undefined,
-@@ -9979,7 +10031,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -10021,7 +10073,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
              // start before that continuation and must leave its buffer intact.
              yield* projectDeferredCarryoverTerminals(rehydratedCarryoverSubagents);
              // Retain projected terminals during wake drain so monotonic guards reject replayed spawns.
@@ -548,7 +555,7 @@ index 4b35e96786..06712f6ee7 100644
                yield* Ref.set(continuationRequested, false);
                yield* Ref.update(wakeReports, ({ reports, offered }) => ({
                  reports: new Map([...reports].filter(([key]) => !offered.has(key))),
-@@ -10056,6 +10115,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -10098,6 +10157,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                flavor.watchPromptOutcome === undefined
                  ? undefined
                  : yield* flavor.watchPromptOutcome(requestedSessionId);
@@ -556,7 +563,7 @@ index 4b35e96786..06712f6ee7 100644
              const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
              const promptOptions = {
                dispatched: context.promptDispatched,
-@@ -10224,6 +10284,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -10266,6 +10326,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                    }
                    context.promptSettled = false;
                    context.promptSettledStatus = null;
