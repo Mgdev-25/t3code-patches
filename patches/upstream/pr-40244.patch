@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
-index 0a9b1a0f..237e7ded 100644
+index 0a9b1a0f8e..237e7ded6b 100644
 --- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.test.ts
 @@ -1,3 +1,5 @@
@@ -148,7 +148,7 @@ index 0a9b1a0f..237e7ded 100644
  
  describe("AntigravityAdapterV2 subagent reads", () => {
 diff --git a/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts b/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
-index b1c15b13..2f1c6c3f 100644
+index b1c15b1396..2f1c6c3f7c 100644
 --- a/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
 +++ b/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
 @@ -67,6 +67,31 @@ const STATUS_QUOTA_ERROR = Buffer.concat([
@@ -301,7 +301,7 @@ index b1c15b13..2f1c6c3f 100644
        for (const error of [NOT_FOUND_ERROR, STATUS_NOT_FOUND_ERROR]) {
          assert.deepEqual(
 diff --git a/apps/server/src/provider/acp/AntigravityTurnOutcome.ts b/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
-index 59057794..0145a2b8 100644
+index 5905779472..0145a2b82c 100644
 --- a/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
 +++ b/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
 @@ -24,17 +24,25 @@ const MAX_ERROR_PAYLOAD_BYTES = 16_384;
@@ -382,10 +382,10 @@ index 59057794..0145a2b8 100644
  
  // Reorders STATUS_ERROR's groups to API_ERROR's: HTTP status, message, status name.
 diff --git a/packages/provider-acp/src/server/adapter.ts b/packages/provider-acp/src/server/adapter.ts
-index 241b9d1b..16bcb151 100644
+index 4b35e96786..06712f6ee7 100644
 --- a/packages/provider-acp/src/server/adapter.ts
 +++ b/packages/provider-acp/src/server/adapter.ts
-@@ -1787,6 +1787,10 @@ interface ActiveAcpTurn {
+@@ -1793,6 +1793,10 @@ interface ActiveAcpTurn {
    promptSequence: number;
    /** The turn already resent a prompt after a resumable outcome failure. */
    outcomeResumed: boolean;
@@ -396,7 +396,7 @@ index 241b9d1b..16bcb151 100644
    /** Clock millis just before `session/prompt` was handed to the runtime. */
    promptSentAt: number | null;
    /** Completed when an update after dispatch matches `cancelAfterPromptStarts.isStart`. */
-@@ -2439,6 +2443,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -2481,6 +2485,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            flavor.compactSession !== undefined ||
            flavor.compactViaAdvertisedCommand === true;
          const runtimeRestartRequired = yield* Ref.make(false);
@@ -409,7 +409,7 @@ index 241b9d1b..16bcb151 100644
          const runtimeTeardownState = yield* Ref.make<AcpRuntimeTeardownState>({ _tag: "Idle" });
          const runtimeCallbackGeneration = yield* Ref.make(0);
          const runtimeCallbackGenerationCounter = yield* Ref.make(0);
-@@ -4456,6 +4466,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -4498,6 +4508,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            incoming: AcpToolCallState,
            projectedStatus?: ProjectedToolStatus,
            rawPayload?: unknown,
@@ -417,7 +417,7 @@ index 241b9d1b..16bcb151 100644
          ) => Effect.Effect<void> = () => Effect.void;
  
          const markAwaitingBackgroundHydration =
-@@ -4509,6 +4520,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -4551,6 +4562,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            incoming: AcpToolCallState,
            projectedStatus?: ProjectedToolStatus,
            rawPayload?: unknown,
@@ -425,7 +425,7 @@ index 241b9d1b..16bcb151 100644
          ) {
            if (context.assistant.current?.sourceMessageId == null)
              yield* closeTextStream(context, "assistant");
-@@ -5136,7 +5148,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -5183,7 +5195,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
              }
            }
            yield* emitProviderEvent({ type: "turn_item.updated", driver, turnItem });
@@ -436,7 +436,7 @@ index 241b9d1b..16bcb151 100644
          });
  
          /**
-@@ -8163,6 +8177,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -8199,6 +8213,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            ) {
              rememberTerminalEnvironment(candidate.sessionId, yield* readMcpContext(threadId));
              yield* Ref.set(runtimeRestartRequired, false);
@@ -444,7 +444,7 @@ index 241b9d1b..16bcb151 100644
              yield* Ref.set(activeSessionId, candidate.sessionId);
              yield* setActiveSessionSetup(candidate);
              yield* Ref.set(activeSelection, null);
-@@ -8215,6 +8230,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -8251,6 +8266,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                });
                itemIdentityVersion = 2;
                yield* Ref.set(runtimeRestartRequired, false);
@@ -452,7 +452,7 @@ index 241b9d1b..16bcb151 100644
                prepareClaimableTerminalEnvironment(yield* readMcpContext(input.threadId));
                return yield* startAcpRuntime(input.threadId);
              });
-@@ -8725,7 +8741,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -8755,7 +8771,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
              if (!acpCompletedTurnShouldTerminalizeTool(tool, { ...flavor, extractSubagentUpdate }))
                continue;
              if (options?.unstartedOnly === true && tool.status !== "pending") continue;
@@ -461,7 +461,7 @@ index 241b9d1b..16bcb151 100644
            }
          });
  
-@@ -8980,6 +8996,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9010,6 +9026,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                });
              }
            }
@@ -480,7 +480,7 @@ index 241b9d1b..16bcb151 100644
            yield* Ref.set(activeTurn, null);
            if (settledStatus === "completed" && !directStopQuarantine) {
              yield* detachBackgroundCommands(context);
-@@ -9011,6 +9039,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9041,6 +9069,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            if (hasDeferredBackgroundWork(context)) return;
            context.backgroundFinalizeGeneration += 1;
            const generation = context.backgroundFinalizeGeneration;
@@ -488,7 +488,7 @@ index 241b9d1b..16bcb151 100644
            const replyOpen = context.replyOpen;
            const debounce = replyOpen ? ACP_OPEN_REPLY_QUIET_LIMIT : ACP_DEFERRED_FINALIZE_DEBOUNCE;
            yield* Effect.gen(function* () {
-@@ -9031,7 +9060,28 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9061,7 +9090,28 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                yield* scheduleDeferredFinalize(context);
                return;
              }
@@ -517,15 +517,15 @@ index 241b9d1b..16bcb151 100644
              yield* finalizeTurn(context, status);
            }).pipe(Effect.forkIn(sessionScope), Effect.asVoid);
            yield* options.testHooks?.onDeferredFinalizeScheduled?.(debounce) ?? Effect.void;
-@@ -9349,6 +9399,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9379,6 +9429,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
            if (!restartRequired) return false;
            yield* restartAcpRuntime(threadId);
            yield* Ref.set(runtimeRestartRequired, false);
 +          yield* Ref.set(pendingContinuationOutcome, null);
            yield* Ref.set(activeSessionId, null);
            yield* Ref.set(activeSessionSetup, null);
-           yield* Ref.set(activeSelection, null);
-@@ -9870,6 +9921,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+           yield* resetPublishedCatalogKey;
+@@ -9901,6 +9952,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                foregroundIdle: yield* Deferred.make<void>(),
                promptSequence: 0,
                outcomeResumed: false,
@@ -533,7 +533,7 @@ index 241b9d1b..16bcb151 100644
                promptSentAt: null,
                promptStarted,
                promptUsage: undefined,
-@@ -9948,7 +10000,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -9979,7 +10031,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
              // start before that continuation and must leave its buffer intact.
              yield* projectDeferredCarryoverTerminals(rehydratedCarryoverSubagents);
              // Retain projected terminals during wake drain so monotonic guards reject replayed spawns.
@@ -548,7 +548,7 @@ index 241b9d1b..16bcb151 100644
                yield* Ref.set(continuationRequested, false);
                yield* Ref.update(wakeReports, ({ reports, offered }) => ({
                  reports: new Map([...reports].filter(([key]) => !offered.has(key))),
-@@ -10025,6 +10084,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -10056,6 +10115,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                flavor.watchPromptOutcome === undefined
                  ? undefined
                  : yield* flavor.watchPromptOutcome(requestedSessionId);
@@ -556,7 +556,7 @@ index 241b9d1b..16bcb151 100644
              const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
              const promptOptions = {
                dispatched: context.promptDispatched,
-@@ -10193,6 +10253,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+@@ -10224,6 +10284,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                    }
                    context.promptSettled = false;
                    context.promptSettledStatus = null;
