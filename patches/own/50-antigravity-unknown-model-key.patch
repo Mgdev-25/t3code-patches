@@ -1,0 +1,133 @@
+diff --git a/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts b/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
+index 33b01786a8..e2f6ab8f3e 100644
+--- a/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
++++ b/apps/server/src/provider/acp/AntigravityTurnOutcome.test.ts
+@@ -384,4 +384,95 @@ describe("watchAntigravityPromptOutcome", () => {
+       );
+     }).pipe(Effect.provide(NodeServices.layer)),
+   );
++
++  it.effect(
++    "resumes mid-turn unknown model key errors and fails cleanly before the model answers",
++    () =>
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const profileDirectory = yield* fs.makeTempDirectoryScoped();
++        const sessionId = "03918ba1-1869-4452-907b-7f32536e6cf0";
++        const conversations = path.join(profileDirectory, "antigravity-acp", "conversations");
++        yield* fs.makeDirectory(conversations, { recursive: true });
++        let nextIndex = 0;
++        const appendSteps = (steps: ReadonlyArray<readonly [number, Uint8Array]>) => {
++          const database = new NodeSqlite.DatabaseSync(path.join(conversations, `${sessionId}.db`));
++          try {
++            database.exec(
++              "CREATE TABLE IF NOT EXISTS steps (idx INTEGER PRIMARY KEY, step_type INTEGER, step_payload BLOB)",
++            );
++            const insert = database.prepare("INSERT INTO steps VALUES (?, ?, ?)");
++            for (const [type, payload] of steps) insert.run(nextIndex++, type, payload);
++          } finally {
++            database.close();
++          }
++        };
++        const turn = (steps: ReadonlyArray<readonly [number, Uint8Array]>) =>
++          Effect.gen(function* () {
++            const check = yield* watchAntigravityPromptOutcome(profileDirectory, sessionId);
++            appendSteps(steps);
++            return yield* check({ stopReason: "end_turn" });
++          });
++
++        // Plain Go agentexecutor error captured from Antigravity with no HTTP status line.
++        const unknownModelKeyError = Buffer.concat([
++          Buffer.from([0x0a, 0x28]),
++          Buffer.from(
++            "Agent execution terminated due to error.\u0012iagent executor error: generating and executing: unknown model key MODEL_PLACEHOLDER_M532: model not found\u001a\u0027agent executor error: generating and executing: unknown model key MODEL_PLACEHOLDER_M532: model not found\n(1) attached stack trace\n  -- stack trace:",
++          ),
++        ]);
++        // 0x39 ('9') is the protobuf length varint for the 57-byte message and must not break matching.
++        const bareVarintPrefixedError = Buffer.concat([
++          Buffer.from([0x12, 0x39]),
++          Buffer.from(
++            "unknown model key MODEL_PLACEHOLDER_M532: model not found\u001a\n(1) attached stack trace",
++          ),
++        ]);
++        const input = Buffer.from("Continue the work.");
++        const reply = Buffer.from("Working on it.");
++
++        for (const error of [unknownModelKeyError, bareVarintPrefixedError]) {
++          assert.deepEqual(
++            yield* turn([
++              [USER_INPUT, input],
++              [PLANNER_RESPONSE, reply],
++              [TOOL, reply],
++              [ERROR_MESSAGE, error],
++            ]),
++            {
++              ...reusable({
++                class: "provider_error",
++                message: "unknown model key MODEL_PLACEHOLDER_M532: model not found",
++                code: "MODEL_NOT_FOUND",
++                retryable: true,
++              }),
++              resumeWith: "continue",
++            },
++          );
++        }
++
++        // Before the model answered, keep retryable: false and omit resumeWith.
++        assert.deepEqual(
++          yield* turn([
++            [USER_INPUT, input],
++            [ERROR_MESSAGE, unknownModelKeyError],
++          ]),
++          reusable({
++            class: "provider_error",
++            message: "unknown model key MODEL_PLACEHOLDER_M532: model not found",
++            code: "MODEL_NOT_FOUND",
++            retryable: false,
++          }),
++        );
++
++        // Quoting the error text in a normal planner response does not fail the turn.
++        assert.isUndefined(
++          yield* turn([
++            [USER_INPUT, input],
++            [PLANNER_RESPONSE, unknownModelKeyError],
++          ]),
++        );
++      }).pipe(Effect.provide(NodeServices.layer)),
++  );
+ });
+diff --git a/apps/server/src/provider/acp/AntigravityTurnOutcome.ts b/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
+index 32d7989353..3b9eb1e352 100644
+--- a/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
++++ b/apps/server/src/provider/acp/AntigravityTurnOutcome.ts
+@@ -72,6 +72,8 @@ const GO_DURATION_UNIT_MS: Record<string, number> = {
+   h: 3_600_000,
+ };
+ const NATIVE_SESSION_ID = /^[\w-]+$/;
++// Antigravity's Go agentexecutor can fail mid-turn with a plain executor error and no HTTP status.
++const UNKNOWN_MODEL_KEY = /unknown model key [\w./-]+: model not found/;
+ 
+ interface LastStep {
+   readonly type: number;
+@@ -253,6 +255,19 @@ function turnFailure(
+     );
+   }
+   if (apiError === null) {
++    const unknownModelKey = UNKNOWN_MODEL_KEY.exec(text);
++    if (unknownModelKey !== null) {
++      const transientModelNotFound = step?.reachedModel === true;
++      const failure = makeProviderFailure({
++        class: "provider_error",
++        message: unknownModelKey[0],
++        code: "MODEL_NOT_FOUND",
++        retryable: transientModelNotFound,
++      });
++      return transientModelNotFound
++        ? { failure, threadDisposition: "reusable", resumeWith: "continue" }
++        : reusable(failure);
++    }
+     return reusable(
+       makeProviderFailure({
+         class: "provider_error",

@@ -9,7 +9,7 @@ decisions.
 
 - `patches.json` is the list. Upstream PRs come first, each pinned to a head
   SHA with its saved diff in `patches/upstream/`. Own patches follow, each with
-  its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 14
+  its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 15
   own patches, bug fixes only. Morgan allowed these exceptions:
   - `1448-form-free-text-mic`, the mic button in the free-text answer of a
     question form, in Shell issue 1448.
