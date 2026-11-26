@@ -177,6 +177,15 @@
       "summary": "Auto-resumes mid-turn Antigravity unknown model key errors with continue.",
       "check": "Run vp test run src/provider/acp/AntigravityTurnOutcome.test.ts in apps/server: mid-turn unknown model key errors return code MODEL_NOT_FOUND, retryable true, and resumeWith continue; before the model answers they return retryable false with no resumeWith. Tracked in t3code-patches issue 50.",
       "dropWhen": "Upstream AntigravityTurnOutcome matches unknown model key errors with code MODEL_NOT_FOUND, returns retryable true and resumeWith continue when reachedModel is true, and keeps retryable false with no resumeWith before the model answers."
+    },
+    {
+      "id": "53-speech-cascade-hook",
+      "bug": 53,
+      "file": "patches/own/53-speech-cascade-hook.patch",
+      "title": "Local speech cascade hook",
+      "summary": "Routes batch dictation through an optional loopback cascade daemon with local Parakeet Ultra fallback.",
+      "check": "Run vp test run src/speech/cascade.test.ts src/speech/SpeechService.test.ts in apps/server: when T3CODE_SPEECH_CASCADE_URL and T3CODE_SPEECH_CASCADE_TOKEN_FILE are set to loopback, status disables streaming flags, prepareModel is a no-op, transcribe posts framed PCM with bearer auth and runs fuzzy/alias correction and finalizeTranscript without loading the native model, explicit speechDetected false returns empty text, non-abort failures fall back to local Parakeet Ultra, and caller interrupts stop without fallback. Tracked in t3code-patches issue 53 and Shell issue 1743.",
+      "dropWhen": "Upstream SpeechService supports an external HTTP speech-to-text cascade hook with loopback bearer auth, batch routing, and local native fallback."
     }
   ]
 }
