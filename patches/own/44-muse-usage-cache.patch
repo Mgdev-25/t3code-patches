@@ -1,5 +1,5 @@
 diff --git a/packages/provider-core/src/server/managedProvider.ts b/packages/provider-core/src/server/managedProvider.ts
-index 08efa7aa6d..3d423d6ee0 100644
+index 08efa7aa6d..70afae4d42 100644
 --- a/packages/provider-core/src/server/managedProvider.ts
 +++ b/packages/provider-core/src/server/managedProvider.ts
 @@ -29,6 +29,7 @@ interface ProviderSnapshotState {
@@ -18,14 +18,18 @@ index 08efa7aa6d..3d423d6ee0 100644
      checked: false,
    });
    const settingsRef = yield* Ref.make(initialSettings);
-@@ -215,9 +217,17 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+@@ -215,9 +217,21 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
          // Some account logins identify the account by display label instead of email.
          const identity = (auth: ServerProvider["auth"]) =>
            auth.email?.toLowerCase() ?? (auth.type === "accountLogin" ? auth.label : undefined);
-+        const previousIdentity =
-+          identity(previous) ??
-+          (state.snapshot.usageLimits ? state.usageAccountIdentity : undefined);
++        const previousIdentity = identity(previous) ?? state.usageAccountIdentity;
 +        const probedIdentity = identity(probedSnapshot.auth);
++        const clearedAuth =
++          probedSnapshot.auth.status === "unauthenticated" ||
++          probedSnapshot.auth.type === "apiKey" ||
++          (probedSnapshot.auth.status === "authenticated" &&
++            probedSnapshot.auth.type === "accountLogin" &&
++            probedIdentity === undefined);
          const switchedAccount =
 -          (identity(probedSnapshot.auth) !== undefined && identity(previous) === undefined) ||
 -          differs(identity(probedSnapshot.auth), identity(previous)) ||
@@ -38,21 +42,18 @@ index 08efa7aa6d..3d423d6ee0 100644
            (probedSnapshot.auth.workspaceId !== undefined &&
              probedSnapshot.auth.workspaceId !== previous.workspaceId);
          const usageLimits = switchedAccount
-@@ -237,6 +247,13 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+@@ -237,6 +251,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
            usageLimits?.checkedAt === state.snapshot.usageLimits?.checkedAt
              ? state.usageAuthLabel
              : undefined;
++        // Keep the last confirmed identity through unknown/error auth even before the first usage
++        // report arrives, so switching to an unnamed accountLogin replaces any live report from A.
 +        const usageAccountIdentity =
-+          usageLimits === undefined
-+            ? undefined
-+            : (probedIdentity ??
-+              (!switchedAccount && usageLimits.checkedAt === state.snapshot.usageLimits?.checkedAt
-+                ? previousIdentity
-+                : undefined));
++          probedIdentity ?? (clearedAuth ? undefined : previousIdentity);
          const labeledProbe =
            usageAuthLabel === undefined
              ? probedSnapshot
-@@ -252,7 +269,13 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+@@ -252,7 +270,13 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
          );
          return [
            { snapshot, generation },
@@ -452,10 +453,10 @@ index 0000000000..eba666766e
 +  return { read, write, reconcileAuth, clear } satisfies MuseUsageCache;
 +});
 diff --git a/packages/provider-muse/src/server/usageLimits.test.ts b/packages/provider-muse/src/server/usageLimits.test.ts
-index 2e808d33c3..7be134fc95 100644
+index 2e808d33c3..e46b66b69e 100644
 --- a/packages/provider-muse/src/server/usageLimits.test.ts
 +++ b/packages/provider-muse/src/server/usageLimits.test.ts
-@@ -195,5 +195,22 @@ describe("Muse usage limits", () => {
+@@ -195,5 +195,24 @@ describe("Muse usage limits", () => {
        generation: 3,
        identity: "b@example.com",
      });
@@ -476,13 +477,29 @@ index 2e808d33c3..7be134fc95 100644
 +      type: "accountLogin",
 +    });
 +    expect(anonymousAfterLogout).toEqual({ generation: 3, identity: undefined });
++    // Case-only email changes refer to the same account and must not bump generation.
++    expect(nextMuseUsageAccount(named, { ...login, email: "A@Example.com" })).toBe(named);
    });
  });
 diff --git a/packages/provider-muse/src/server/usageLimits.ts b/packages/provider-muse/src/server/usageLimits.ts
-index 881c577390..0daf80e822 100644
+index 881c577390..8660e48e81 100644
 --- a/packages/provider-muse/src/server/usageLimits.ts
 +++ b/packages/provider-muse/src/server/usageLimits.ts
-@@ -128,9 +128,21 @@ export function nextMuseUsageAccount(
+@@ -105,9 +105,11 @@ export function museUsageLimits(
+   });
+ }
+ 
+-/** The login a status check names: its address or label. */
++/** The login a status check names: its normalized email address or label. */
+ export function museUsageAccount(auth: ServerProviderAuth): string | undefined {
+-  return auth.type === "accountLogin" ? (auth.email ?? auth.label) : undefined;
++  if (auth.type !== "accountLogin") return undefined;
++  const email = auth.email?.trim().toLowerCase();
++  return email || auth.label;
+ }
+ 
+ /**
+@@ -128,9 +130,21 @@ export function nextMuseUsageAccount(
  ): MuseUsageAccount {
    const identity =
      auth.status === "unauthenticated" || auth.type === "apiKey" ? null : museUsageAccount(auth);
@@ -507,7 +524,7 @@ index 881c577390..0daf80e822 100644
  }
  
 diff --git a/packages/provider-muse/src/server/usageProbe.test.ts b/packages/provider-muse/src/server/usageProbe.test.ts
-index ec11432b3a..70fbada4ed 100644
+index ec11432b3a..6ea99431cc 100644
 --- a/packages/provider-muse/src/server/usageProbe.test.ts
 +++ b/packages/provider-muse/src/server/usageProbe.test.ts
 @@ -1,15 +1,25 @@
@@ -536,7 +553,7 @@ index ec11432b3a..70fbada4ed 100644
  import { refreshMuseUsage as refreshState, type MuseUsageReport } from "./usageProbe.ts";
  import type { MuseUsageAccount } from "./usageLimits.ts";
  import * as Ref from "effect/Ref";
-@@ -382,4 +392,592 @@ it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
+@@ -382,4 +392,680 @@ it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
        }),
      ),
    );
@@ -1118,6 +1135,94 @@ index ec11432b3a..70fbada4ed 100644
 +          expect(f8AfterLogin.provider.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([
 +            0, 6,
 +          ]);
++
++          // Scenario 10 (F5 pre-usage unknown): A has no usage yet -> auth becomes unknown ->
++          // A's first live report [70, 50] arrives via applyUsageLimits -> unnamed B signs in
++          // with older [0, 6] -> published snapshot must show [0, 6].
++          yield* TestClock.setTime(observedAtMs + 1_000);
++          const f5bStep = yield* Ref.make<"noUsageA" | "unknown" | "unnamedB">("noUsageA");
++          const f5bState = {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++            cacheFallbackPublished: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++          };
++          yield* cache.clear;
++          const f5bManaged = yield* makeManagedServerProvider<{ readonly enabled: boolean }>({
++            resolveMaintenance: () => Effect.succeed(maintenance),
++            getSettings: Effect.succeed({ enabled: true }),
++            streamSettings: Stream.empty,
++            haveSettingsChanged: (a, b) => a.enabled !== b.enabled,
++            initialSnapshot: () => Effect.succeed(stamp({ ...provider, usageLimits: undefined })),
++            checkProvider: Effect.gen(function* () {
++              const step = yield* Ref.get(f5bStep);
++              const draft: ServerProviderDraft =
++                step === "unknown"
++                  ? { ...provider, auth: { status: "unknown" } }
++                  : step === "unnamedB"
++                    ? { ...provider, auth: { status: "authenticated", type: "accountLogin" } }
++                    : provider;
++              const refreshed = yield* refreshState({
++                ...(step === "unnamedB" ? olderBInput : emptyInput),
++                provider: draft,
++                state: f5bState,
++              });
++              return stamp(refreshed.provider);
++            }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
++            refreshOnInterval: false,
++          });
++          yield* f5bManaged.refresh;
++          yield* Ref.set(f5bStep, "unknown");
++          yield* f5bManaged.refresh;
++          // Simulate A's first live stream report arriving while auth is unknown.
++          yield* f5bManaged.applyUsageLimits({
++            checkedAt: "2026-10-27T04:04:16.130Z",
++            complete: true,
++            windows: [
++              { id: "window", kind: "session", label: "Session", windowDurationMins: 300, usedPercent: 70 },
++              { id: "weekly", kind: "weekly", label: "Weekly", windowDurationMins: 10080, usedPercent: 50 },
++            ],
++          });
++          expect((yield* f5bManaged.getSnapshot).usageLimits?.windows.map((w) => w.usedPercent)).toEqual([
++            70, 50,
++          ]);
++          yield* Ref.set(f5bStep, "unnamedB");
++          expect((yield* f5bManaged.refresh).usageLimits?.windows.map((w) => w.usedPercent)).toEqual([
++            0, 6,
++          ]);
++
++          // Scenario 11 (F9 case-insensitive email): changing a@example.com to A@example.com
++          // keeps the same generation, retains disk bars on empty reply, and does not overwrite
++          // newer disk bars with an older CLI reply.
++          yield* TestClock.setTime(observedAtMs + 1_000);
++          yield* cache.write(provider.auth, report.usage);
++          const f9State = {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++            cacheFallbackPublished: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++          };
++          const f9First = yield* refreshState({ ...emptyInput, provider, state: f9State });
++          expect(f9First.provider.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([1, 33]);
++          const f9UpperAuth = { ...provider.auth, email: "A@example.com" };
++          const f9Empty = yield* refreshState({
++            ...emptyInput,
++            provider: { ...provider, auth: f9UpperAuth },
++            state: f9State,
++          });
++          expect(f9Empty.account.generation).toBe(0);
++          expect(f9Empty.provider.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([1, 33]);
++          const f9Older = yield* refreshState({
++            ...olderBInput,
++            provider: { ...provider, auth: f9UpperAuth },
++            state: f9State,
++          });
++          expect(f9Older.account.generation).toBe(0);
++          expect((yield* cache.read(f9UpperAuth, observedAtMs + 2_000))?.observedAtMs).toBe(
++            observedAtMs,
++          );
 +        }),
 +      ).pipe(
 +        Effect.provide(
