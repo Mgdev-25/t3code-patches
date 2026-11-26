@@ -159,6 +159,15 @@
       "summary": "Restores local Antigravity usage bars and limits from Google's quota endpoints.",
       "check": "With a fresh antigravity-oauth-token on disk (renewed by running an Antigravity turn) and the patched T3 server running after update, Usage -> Limits and model-pick --usage show Antigravity Gemini and 3p quota windows. Tracked in t3code-patches issue 45.",
       "dropWhen": "Upstream Antigravity reports usage limits over official ACP or stops writing antigravity-oauth-token."
+    },
+    {
+      "id": "48-android-navigation-config-changes",
+      "bug": 48,
+      "file": "patches/own/48-android-navigation-config-changes.patch",
+      "title": "Android navigation configChanges",
+      "summary": "Keeps the open chat when a Bluetooth remote changes Android navigation hardware state.",
+      "check": "Run vp test run plugins/withAndroidNavigationConfigChanges.test.mjs in apps/mobile: MainActivity android:configChanges includes navigation without dropping existing entries or duplicating on repeated prebuild. On Android with a Bluetooth HID remote (PRC-1), connecting or disconnecting the remote keeps the open chat instead of recreating MainActivity and returning to Home. Tracked in t3code-patches issue 48.",
+      "dropWhen": "Upstream MainActivity android:configChanges in AndroidManifest.xml already includes navigation."
     }
   ]
 }

@@ -1,0 +1,173 @@
+From 60e957e25dd9a5d9601af3c7e60766238429c8ca Mon Sep 17 00:00:00 2001
+From: Morgan <noreply@example.invalid>
+Date: Thu, 26 Nov 2026 14:52:25 +0100
+Subject: [PATCH] fix(mobile): add navigation to Android MainActivity
+ configChanges
+
+Bluetooth HID remotes that expose a dpad/navigation profile toggle Android's
+CONFIG_NAVIGATION bit when they connect or sleep. Upstream MainActivity
+omits navigation from android:configChanges, so Android destroys and recreates
+MainActivity and resets the open chat to Home.
+
+Add an Expo config plugin that ensures navigation is present in MainActivity's
+android:configChanges without dropping existing entries or duplicating it on
+repeated prebuild runs.
+
+Mgdev-25/t3code-patches issue 48.
+---
+ apps/mobile/app.config.ts                     |   1 +
+ .../withAndroidNavigationConfigChanges.cjs    |  22 ++++
+ ...ithAndroidNavigationConfigChanges.test.mjs | 100 ++++++++++++++++++
+ 3 files changed, 123 insertions(+)
+ create mode 100644 apps/mobile/plugins/withAndroidNavigationConfigChanges.cjs
+ create mode 100644 apps/mobile/plugins/withAndroidNavigationConfigChanges.test.mjs
+
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index a868851d5c..5d2372c45c 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -459,6 +459,7 @@ const config: ExpoConfig = {
+     // Mods run in reverse order; expo-widgets must create and wipe the target before assets are added.
+     ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
+     "./plugins/withAndroidNetworkSecurityConfig.cjs",
++    "./plugins/withAndroidNavigationConfigChanges.cjs",
+     "./plugins/withAndroidGradleHeap.cjs",
+     "./plugins/withAndroidInputBackground.cjs",
+     "./plugins/withAndroidModernPopupMenu.cjs",
+diff --git a/apps/mobile/plugins/withAndroidNavigationConfigChanges.cjs b/apps/mobile/plugins/withAndroidNavigationConfigChanges.cjs
+new file mode 100644
+index 0000000000..1e8608965a
+--- /dev/null
++++ b/apps/mobile/plugins/withAndroidNavigationConfigChanges.cjs
+@@ -0,0 +1,22 @@
++const { AndroidConfig, withAndroidManifest } = require("expo/config-plugins");
++
++// Bluetooth HID remotes with a dpad/navigation profile toggle Android's
++// CONFIG_NAVIGATION bit on connect and sleep. Including navigation in
++// MainActivity's android:configChanges delivers onConfigurationChanged
++// instead of destroying and recreating MainActivity.
++module.exports = function withAndroidNavigationConfigChanges(config) {
++  return withAndroidManifest(config, (nextConfig) => {
++    const mainActivity = AndroidConfig.Manifest.getMainActivityOrThrow(nextConfig.modResults);
++    mainActivity.$ ??= {};
++    const current = mainActivity.$["android:configChanges"] ?? "";
++    const entries = current
++      .split("|")
++      .map((entry) => entry.trim())
++      .filter(Boolean);
++    if (!entries.includes("navigation")) {
++      entries.push("navigation");
++      mainActivity.$["android:configChanges"] = entries.join("|");
++    }
++    return nextConfig;
++  });
++};
+diff --git a/apps/mobile/plugins/withAndroidNavigationConfigChanges.test.mjs b/apps/mobile/plugins/withAndroidNavigationConfigChanges.test.mjs
+new file mode 100644
+index 0000000000..35e2f36eda
+--- /dev/null
++++ b/apps/mobile/plugins/withAndroidNavigationConfigChanges.test.mjs
+@@ -0,0 +1,100 @@
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFS from "node:fs";
++import * as NodeModule from "node:module";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import { afterEach, describe, expect, it } from "vite-plus/test";
++
++const require = NodeModule.createRequire(import.meta.url);
++const { AndroidConfig, compileModsAsync, XML } = require("expo/config-plugins");
++const { getConfig } = require("expo/config");
++const withAndroidNavigationConfigChanges = require("./withAndroidNavigationConfigChanges.cjs");
++
++const template = NodeChildProcess.execFileSync(
++  "tar",
++  [
++    "-xOf",
++    NodePath.join(NodePath.dirname(require.resolve("expo/package.json")), "template.tgz"),
++    "package/android/app/src/main/AndroidManifest.xml",
++  ],
++  { encoding: "utf8" },
++);
++
++const projectRoots = [];
++
++afterEach(() => {
++  for (const root of projectRoots.splice(0)) NodeFS.rmSync(root, { recursive: true, force: true });
++});
++
++async function prebuildManifest(manifestXml, { composed = false } = {}) {
++  const projectRoot = NodeFS.mkdtempSync(
++    NodePath.join(NodeOS.tmpdir(), "navigation-config-changes-plugin-"),
++  );
++  projectRoots.push(projectRoot);
++  const manifestPath = NodePath.join(projectRoot, "android/app/src/main/AndroidManifest.xml");
++  NodeFS.mkdirSync(NodePath.dirname(manifestPath), { recursive: true });
++  NodeFS.writeFileSync(manifestPath, manifestXml);
++
++  if (composed) {
++    const { exp } = getConfig(NodePath.resolve(import.meta.dirname, ".."), {
++      isModdedConfig: true,
++    });
++    const manifest = exp.mods?.android?.manifest;
++    await compileModsAsync(
++      { ...exp, mods: { android: manifest ? { manifest } : {} } },
++      { projectRoot, platforms: ["android"] },
++    );
++  } else {
++    await compileModsAsync(
++      withAndroidNavigationConfigChanges({ name: "T3 Code", slug: "t3code" }),
++      { projectRoot, platforms: ["android"] },
++    );
++  }
++
++  return NodeFS.readFileSync(manifestPath, "utf8");
++}
++
++async function readMainActivityConfigChanges(manifestXml) {
++  const parsed = await XML.parseXMLAsync(manifestXml);
++  const mainActivity = AndroidConfig.Manifest.getMainActivityOrThrow(parsed);
++  return mainActivity.$["android:configChanges"] ?? "";
++}
++
++describe("withAndroidNavigationConfigChanges", () => {
++  it("adds navigation to MainActivity android:configChanges without dropping existing entries", async () => {
++    const beforeEntries = (await readMainActivityConfigChanges(template)).split("|").filter(Boolean);
++    expect(beforeEntries).not.toContain("navigation");
++
++    const result = await prebuildManifest(template, { composed: true });
++    const afterEntries = (await readMainActivityConfigChanges(result)).split("|").filter(Boolean);
++
++    expect(afterEntries).toEqual([...beforeEntries, "navigation"]);
++    expect(afterEntries.filter((entry) => entry === "navigation")).toHaveLength(1);
++  });
++
++  it("leaves AndroidManifest.xml unchanged when prebuild runs again", async () => {
++    const once = await prebuildManifest(template, { composed: true });
++    const twice = await prebuildManifest(once, { composed: true });
++
++    expect(twice).toBe(once);
++  });
++
++  it("does not duplicate navigation when it is already present", async () => {
++    const manifestWithNavigation = template.replace(
++      'android:configChanges="',
++      'android:configChanges="navigation|',
++    );
++    const once = await prebuildManifest(manifestWithNavigation);
++    const entries = (await readMainActivityConfigChanges(once)).split("|").filter(Boolean);
++
++    expect(entries.filter((entry) => entry === "navigation")).toHaveLength(1);
++    expect(entries[0]).toBe("navigation");
++  });
++
++  it("sets android:configChanges to navigation when the attribute is missing", async () => {
++    const manifestWithoutAttr = template.replace(/\s+android:configChanges="[^"]*"/, "");
++    const result = await prebuildManifest(manifestWithoutAttr);
++
++    expect(await readMainActivityConfigChanges(result)).toBe("navigation");
++  });
++});
+-- 
+2.55.0
+
