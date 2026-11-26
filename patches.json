@@ -168,6 +168,15 @@
       "summary": "Keeps the open chat when a Bluetooth remote changes Android navigation hardware state.",
       "check": "Run vp test run plugins/withAndroidNavigationConfigChanges.test.mjs in apps/mobile: MainActivity android:configChanges includes navigation without dropping existing entries or duplicating on repeated prebuild. On Android with a Bluetooth HID remote (PRC-1), connecting or disconnecting the remote keeps the open chat instead of recreating MainActivity and returning to Home. Tracked in t3code-patches issue 48.",
       "dropWhen": "Upstream MainActivity android:configChanges in AndroidManifest.xml already includes navigation."
+    },
+    {
+      "id": "50-antigravity-unknown-model-key",
+      "bug": 50,
+      "file": "patches/own/50-antigravity-unknown-model-key.patch",
+      "title": "Antigravity unknown model key resume",
+      "summary": "Auto-resumes mid-turn Antigravity unknown model key errors with continue.",
+      "check": "Run vp test run src/provider/acp/AntigravityTurnOutcome.test.ts in apps/server: mid-turn unknown model key errors return code MODEL_NOT_FOUND, retryable true, and resumeWith continue; before the model answers they return retryable false with no resumeWith. Tracked in t3code-patches issue 50.",
+      "dropWhen": "Upstream AntigravityTurnOutcome matches unknown model key errors with code MODEL_NOT_FOUND, returns retryable true and resumeWith continue when reachedModel is true, and keeps retryable false with no resumeWith before the model answers."
     }
   ]
 }
