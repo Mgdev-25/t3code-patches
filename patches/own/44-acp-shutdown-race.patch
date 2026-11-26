@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts b/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
-index e6652c5963..d6f10f0de5 100644
+index e6652c59..d6f10f0d 100644
 --- a/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
 +++ b/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
 @@ -4691,6 +4691,95 @@ it.effect.each(["manual_shutdown", "server_shutdown"] as const)(
@@ -99,7 +99,7 @@ index e6652c5963..d6f10f0de5 100644
    "ProviderSessionManagerV2 cancels a pending approval when a detach releases its session",
    () =>
 diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/server/src/orchestration-v2/ProviderSessionManager.ts
-index 291ac02272..bb45c37efa 100644
+index 291ac022..bb45c37e 100644
 --- a/apps/server/src/orchestration-v2/ProviderSessionManager.ts
 +++ b/apps/server/src/orchestration-v2/ProviderSessionManager.ts
 @@ -340,6 +340,8 @@ interface LiveSessionEntry {
@@ -164,7 +164,7 @@ index 291ac02272..bb45c37efa 100644
                  busyTurns: new Set(),
                  idleFiber: null,
 diff --git a/apps/server/src/orchestration-v2/runtimeLayer.test.ts b/apps/server/src/orchestration-v2/runtimeLayer.test.ts
-index 370fd7deb9..b374d9d625 100644
+index 539bd8dd..9a206e31 100644
 --- a/apps/server/src/orchestration-v2/runtimeLayer.test.ts
 +++ b/apps/server/src/orchestration-v2/runtimeLayer.test.ts
 @@ -42,6 +42,7 @@ import {
@@ -175,7 +175,7 @@ index 370fd7deb9..b374d9d625 100644
  import * as DateTime from "effect/DateTime";
  import * as Deferred from "effect/Deferred";
  import * as Fiber from "effect/Fiber";
-@@ -14816,3 +14817,373 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
+@@ -14820,3 +14821,373 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
      );
    },
  );
@@ -550,37 +550,41 @@ index 370fd7deb9..b374d9d625 100644
 +    }),
 +);
 diff --git a/apps/server/src/process/agentScope.test.ts b/apps/server/src/process/agentScope.test.ts
-index a637051ece..4bd65ee223 100644
+index dcc4566a..6adc4154 100644
 --- a/apps/server/src/process/agentScope.test.ts
 +++ b/apps/server/src/process/agentScope.test.ts
-@@ -68,11 +68,13 @@ const withFakeSystemd = <A, E>(
-     stopFails = false,
-     leftovers = false,
+@@ -70,6 +70,7 @@ const withFakeSystemd = <A, E>(
      liveOwner = false,
+     noBinSh = false,
+     noScopes = false,
 +    bootServiceUnit,
    }: {
      readonly oomPolicy?: boolean;
      readonly stopFails?: boolean;
-     readonly leftovers?: boolean;
+@@ -77,6 +78,7 @@ const withFakeSystemd = <A, E>(
      readonly liveOwner?: boolean;
+     readonly noBinSh?: boolean;
+     readonly noScopes?: boolean;
 +    readonly bootServiceUnit?: string;
    } = {},
  ) =>
    Effect.gen(function* () {
-@@ -130,7 +132,11 @@ const withFakeSystemd = <A, E>(
+@@ -134,10 +136,10 @@ const withFakeSystemd = <A, E>(
        Effect.provideService(ProviderProcesses.ProviderProcesses, { hasOtherLiveOwner: liveOwner }),
        Effect.provideService(ProcessRunner.ProcessRunner, runner),
        Effect.provideService(HostProcess.Platform, "linux"),
--      Effect.provideService(HostProcess.Environment, { PATH: bin, XDG_RUNTIME_DIR: "/run/user/1" }),
+-      Effect.provideService(
+-        HostProcess.Environment,
+-        noScopes ? { PATH: bin } : { PATH: bin, XDG_RUNTIME_DIR: "/run/user/1" },
+-      ),
 +      Effect.provideService(HostProcess.Environment, {
-+        PATH: bin,
-+        XDG_RUNTIME_DIR: "/run/user/1",
++        ...(noScopes ? { PATH: bin } : { PATH: bin, XDG_RUNTIME_DIR: "/run/user/1" }),
 +        ...(bootServiceUnit === undefined ? {} : { T3_BOOT_SERVICE_UNIT: bootServiceUnit }),
 +      }),
        Effect.provideService(FileSystem.FileSystem, {
          ...fileSystem,
-         readFileString: (path, encoding) =>
-@@ -526,4 +532,28 @@ describe("AgentScope service", () => {
+         exists: (path) =>
+@@ -558,4 +560,38 @@ describe("AgentScope service", () => {
        }),
      ),
    );
@@ -591,7 +595,12 @@ index a637051ece..4bd65ee223 100644
 +      withFakeSystemd(
 +        ({ scope }) =>
 +          Effect.gen(function* () {
-+            const agent = yield* scope.wrap({ command: "agent", args: [], name: "acp", threadId: "a" });
++            const agent = yield* scope.wrap({
++              command: "agent",
++              args: [],
++              name: "acp",
++              threadId: "a",
++            });
 +            expect(agent.args).toContain("--property=Before=t3code.service");
 +          }),
 +        { bootServiceUnit: "t3code.service" },
@@ -602,7 +611,12 @@ index a637051ece..4bd65ee223 100644
 +    withFakeSystemd(
 +      ({ scope }) =>
 +        Effect.gen(function* () {
-+          const agent = yield* scope.wrap({ command: "agent", args: [], name: "acp", threadId: "a" });
++          const agent = yield* scope.wrap({
++            command: "agent",
++            args: [],
++            name: "acp",
++            threadId: "a",
++          });
 +          expect(agent.args.some((arg) => arg.startsWith("--property=Before="))).toBe(false);
 +        }),
 +      { bootServiceUnit: "bad unit name" },
@@ -610,7 +624,7 @@ index a637051ece..4bd65ee223 100644
 +  );
  });
 diff --git a/apps/server/src/process/agentScope.ts b/apps/server/src/process/agentScope.ts
-index 8a62f538cd..7fa300b681 100644
+index 426288ff..7293bb5d 100644
 --- a/apps/server/src/process/agentScope.ts
 +++ b/apps/server/src/process/agentScope.ts
 @@ -92,6 +92,8 @@ function parseCgroupCounter(text: string, key: string): number | undefined {
@@ -622,7 +636,7 @@ index 8a62f538cd..7fa300b681 100644
  const STOPPING_POLL_INTERVAL = "100 millis";
  const STOPPING_POLL_ATTEMPTS = 20;
  const CLEAR_FAILED_INTERVAL = "1 second";
-@@ -182,6 +184,18 @@ export const make = Effect.gen(function* () {
+@@ -187,6 +189,18 @@ export const make = Effect.gen(function* () {
          yield* Effect.logInfo("Agent scopes are off: no systemd user manager");
          return undefined;
        }
@@ -641,7 +655,7 @@ index 8a62f538cd..7fa300b681 100644
        const setProperties = Effect.fn("agentScope.setProperties")(function* (
          slice: string,
          properties: ReadonlyArray<string>,
-@@ -246,6 +260,7 @@ export const make = Effect.gen(function* () {
+@@ -251,6 +265,7 @@ export const make = Effect.gen(function* () {
          systemctl,
          runtimeDir,
          supportsOomPolicy,
@@ -649,7 +663,7 @@ index 8a62f538cd..7fa300b681 100644
          applyMemoryLimits,
        };
      }),
-@@ -453,6 +468,7 @@ export const make = Effect.gen(function* () {
+@@ -458,6 +473,7 @@ export const make = Effect.gen(function* () {
          // unload the unit even when it fails.
          options: [
            ...SCOPE_OPTIONS,
