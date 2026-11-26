@@ -150,6 +150,15 @@
       "summary": "Persists the latest verified Muse subscription usage limits to an atomic JSON file so Limits shows bars right after a reboot.",
       "check": "Run vp test run packages/provider-muse/src/server/usageCache.test.ts packages/provider-muse/src/server/usageProbe.test.ts: verified email logins restore unexpired limits with original checkedAt after restart, account switch or logout or label-only login never restores stale limits, expired or corrupt entries are dropped, and newer live reads win. Morgan's feature exception of 2026-11-26 in Shell issue 1716 and t3code-patches issue 44.",
       "dropWhen": "Upstream provider-muse persists verified subscription usage limits across server restarts without a database migration."
+    },
+    {
+      "id": "45-antigravity-usage-bar",
+      "bug": 45,
+      "file": "patches/own/45-antigravity-usage-bar.patch",
+      "title": "Antigravity usage limits",
+      "summary": "Restores local Antigravity usage bars and limits from Google's quota endpoints.",
+      "check": "With a fresh antigravity-oauth-token on disk (renewed by running an Antigravity turn) and the patched T3 server running after update, Usage -> Limits and model-pick --usage show Antigravity Gemini and 3p quota windows. Tracked in t3code-patches issue 45.",
+      "dropWhen": "Upstream Antigravity reports usage limits over official ACP or stops writing antigravity-oauth-token."
     }
   ]
 }
