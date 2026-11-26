@@ -1,0 +1,1700 @@
+diff --git a/apps/server/src/provider/AntigravityProvider.test.ts b/apps/server/src/provider/AntigravityProvider.test.ts
+index 72e00bfb75..db5bcee763 100644
+--- a/apps/server/src/provider/AntigravityProvider.test.ts
++++ b/apps/server/src/provider/AntigravityProvider.test.ts
+@@ -9,6 +9,7 @@ import {
+   ProviderInstanceId,
+   ProviderSetupError,
+   type RuntimeMode,
++  type ServerProviderUsageLimits,
+ } from "@t3tools/contracts";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+@@ -139,6 +140,8 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
+     readonly auth?: { readonly type: string; readonly label: string };
+     readonly enabled?: boolean;
+     readonly safe?: boolean;
++    readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
++    readonly clearUsage?: Effect.Effect<void>;
+     readonly rememberedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+   } = {},
+ ) {
+@@ -155,6 +158,8 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
+     {
+       stampIdentity: (snapshot) => Effect.succeed({ ...snapshot, instanceId, driver }),
+       ...(options.auth ? { auth: options.auth } : {}),
++      ...(options.probeUsage ? { probeUsage: options.probeUsage } : {}),
++      ...(options.clearUsage ? { clearUsage: options.clearUsage } : {}),
+       ...(options.rememberedRuntimeModes
+         ? { rememberedRuntimeModes: options.rememberedRuntimeModes }
+         : {}),
+@@ -1030,6 +1035,285 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
+       expect(yield* Ref.get(harness.probeCalls)).toBe(1);
+     }),
+   );
++
++  it.effect(
++    "publishes limits, retains a successful read on failure, updates checkedAt on fresh reads, and clears streamChanges on sign-out",
++    () =>
++      Effect.gen(function* () {
++        const limits: ServerProviderUsageLimits = {
++          checkedAt: "2026-10-09T12:00:00.000Z",
++          windows: [
++            {
++              id: "3p-weekly",
++              kind: "weekly",
++              label: "Claude & GPT (shared) · Weekly",
++              usedPercent: 75,
++            },
++          ],
++        };
++        const usage = yield* Ref.make(limits);
++        const harness = yield* makeHarness({ probeUsage: Ref.get(usage) });
++        const published = yield* harness.nextPublish((snapshot) => !!snapshot.usageLimits);
++        yield* harness.initialize;
++        expect((yield* published)?.usageLimits).toEqual(limits);
++
++        // Fresh read with identical windows and newer checkedAt still republishes updated checkedAt.
++        const refreshedLimits: ServerProviderUsageLimits = {
++          ...limits,
++          checkedAt: "2026-10-09T12:01:00.000Z",
++        };
++        yield* Ref.set(usage, refreshedLimits);
++        const refreshedPublish = yield* harness.nextPublish(
++          (snapshot) => snapshot.usageLimits?.checkedAt === refreshedLimits.checkedAt,
++        );
++        yield* harness.provider.snapshot.refresh;
++        expect((yield* refreshedPublish)?.usageLimits).toEqual(refreshedLimits);
++
++        // Failed read keeps the last valid limits without extra options.probe runs.
++        const probesBeforeFailure = yield* Ref.get(harness.probeCalls);
++        yield* Ref.set(usage, {
++          checkedAt: "2026-10-09T12:02:00.000Z",
++          windows: [],
++          unavailable: { reason: "probeFailed" },
++        });
++        yield* harness.provider.snapshot.refresh;
++        yield* Effect.yieldNow;
++        expect((yield* harness.provider.snapshot.getSnapshot).usageLimits).toEqual(refreshedLimits);
++        expect(yield* Ref.get(harness.probeCalls)).toBe(probesBeforeFailure + 1);
++
++        // Sign-out clears limits on streamChanges too, not just getSnapshot.
++        const signedOutPublish = yield* harness.nextPublish(
++          (snapshot) =>
++            snapshot.auth.status === "unauthenticated" && snapshot.usageLimits === undefined,
++        );
++        yield* harness.provider.onSignedOut;
++        expect((yield* signedOutPublish)?.usageLimits).toBeUndefined();
++        expect((yield* harness.provider.snapshot.getSnapshot).usageLimits).toBeUndefined();
++      }),
++  );
++
++  it.effect(
++    "does not restart quota reads during health checks after sign-out and drops in-flight reads on streamChanges",
++    () =>
++      Effect.gen(function* () {
++        const readStarted = yield* Deferred.make<void>();
++        const readResult = yield* Deferred.make<ServerProviderUsageLimits>();
++        const usageCalls = yield* Ref.make(0);
++        const usage = yield* Ref.make<Effect.Effect<ServerProviderUsageLimits>>(
++          Effect.succeed({
++            checkedAt: "2026-10-09T12:00:00.000Z",
++            windows: [{ id: "gemini-5h", kind: "session", label: "Gemini · 5-hour", usedPercent: 10 }],
++          }),
++        );
++        const harness = yield* makeHarness({
++          probeUsage: Ref.update(usageCalls, (n) => n + 1).pipe(
++            Effect.andThen(Ref.get(usage)),
++            Effect.flatten,
++          ),
++        });
++        const firstPublish = yield* harness.nextPublish((s) => !!s.usageLimits);
++        yield* harness.initialize;
++        expect((yield* firstPublish)?.usageLimits?.windows).toHaveLength(1);
++
++        yield* Ref.set(harness.probe, Effect.succeed(initializeResult));
++        yield* Ref.set(
++          usage,
++          Deferred.succeed(readStarted, undefined).pipe(Effect.andThen(Deferred.await(readResult))),
++        );
++        const streamEvents = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
++        yield* harness.provider.snapshot.streamChanges.pipe(
++          Stream.runForEach((snapshot) => Ref.update(streamEvents, (all) => [...all, snapshot])),
++          Effect.forkChild,
++        );
++        yield* Effect.yieldNow;
++
++        const refresh = yield* harness.provider.snapshot.refresh.pipe(Effect.forkChild);
++        yield* Deferred.await(readStarted);
++        yield* harness.provider.onSignedOut;
++        yield* Deferred.succeed(readResult, {
++          checkedAt: "2026-10-09T12:01:00.000Z",
++          windows: [{ id: "gemini-5h", kind: "session", label: "Gemini · 5-hour", usedPercent: 90 }],
++        });
++        yield* Fiber.join(refresh);
++
++        // Subsequent health check while signed out must NOT invoke probeUsage again.
++        const callsAfterSignOut = yield* Ref.get(usageCalls);
++        const signedOutSnapshot = yield* harness.provider.snapshot.refresh;
++        yield* Effect.yieldNow;
++        expect(signedOutSnapshot.auth.status).toBe("unauthenticated");
++        expect(signedOutSnapshot.usageLimits).toBeUndefined();
++        expect(yield* Ref.get(usageCalls)).toBe(callsAfterSignOut);
++        expect((yield* Ref.get(streamEvents)).at(-1)?.usageLimits).toBeUndefined();
++      }),
++  );
++
++  it.effect(
++    "sign-out during an active health probe does not deadlock and clears limits on streamChanges",
++    () =>
++      Effect.gen(function* () {
++        const limits: ServerProviderUsageLimits = {
++          checkedAt: "2026-10-09T12:00:00.000Z",
++          windows: [{ id: "gemini-5h", kind: "session", label: "Gemini · 5-hour", usedPercent: 30 }],
++        };
++        const harness = yield* makeHarness({ probeUsage: Effect.succeed(limits) });
++        const firstPublish = yield* harness.nextPublish((s) => !!s.usageLimits);
++        yield* harness.initialize;
++        expect((yield* firstPublish)?.usageLimits).toEqual(limits);
++        yield* harness.provider.onSessionStarted(started);
++
++        const streamEvents = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
++        yield* harness.provider.snapshot.streamChanges.pipe(
++          Stream.runForEach((snapshot) => Ref.update(streamEvents, (all) => [...all, snapshot])),
++          Effect.forkChild,
++        );
++        yield* Effect.yieldNow;
++
++        const probeEntered = yield* Deferred.make<void>();
++        const releaseProbe = yield* Deferred.make<EffectAcpSchema.InitializeResponse>();
++        yield* Ref.set(
++          harness.probe,
++          Deferred.succeed(probeEntered, undefined).pipe(Effect.andThen(Deferred.await(releaseProbe))),
++        );
++        const clearedPublish = yield* harness.nextPublish(
++          (snapshot) =>
++            snapshot.auth.status === "unauthenticated" && snapshot.usageLimits === undefined,
++        );
++        const refresh = yield* harness.provider.snapshot.refresh.pipe(Effect.forkChild);
++        yield* Deferred.await(probeEntered);
++        // Must return immediately without waiting on refreshSemaphore.
++        yield* harness.provider.onSignedOut;
++        yield* Deferred.succeed(releaseProbe, initializeResult);
++        yield* Fiber.join(refresh);
++        expect((yield* clearedPublish)?.usageLimits).toBeUndefined();
++        const events = yield* Ref.get(streamEvents);
++        expect(events.at(-1)?.auth.status).toBe("unauthenticated");
++        expect(events.at(-1)?.usageLimits).toBeUndefined();
++      }),
++  );
++
++  it.effect(
++    "reports ready and stores a quota read that started before onSessionStarted (usageEpoch guard)",
++    () =>
++      Effect.gen(function* () {
++        const reads = yield* Ref.make(0);
++        const readStarted = yield* Deferred.make<void>();
++        const readResult = yield* Deferred.make<ServerProviderUsageLimits>();
++        const harness = yield* makeHarness({
++          probeUsage: Ref.update(reads, (count) => count + 1).pipe(
++            Effect.andThen(Deferred.succeed(readStarted, undefined)),
++            Effect.andThen(Deferred.await(readResult)),
++          ),
++        });
++        const published = yield* harness.nextPublish((snapshot) => !!snapshot.usageLimits);
++        yield* harness.initialize;
++        yield* Deferred.await(readStarted);
++        // Starting sessions increments authRevision, but must NOT discard the in-flight quota read.
++        yield* harness.provider.onSessionStarted(started, "/workspace");
++        yield* harness.provider.onSessionStarted(started, "/other");
++        const ready = yield* harness.provider.snapshot.getSnapshot;
++        expect(ready).toMatchObject({ status: "ready", auth: { status: "authenticated" } });
++        expect(ready.usageLimits).toBeUndefined();
++        expect(yield* Ref.get(reads)).toBe(1);
++        const limits = {
++          checkedAt: "2026-10-09T12:00:00.000Z",
++          windows: [{ id: "gemini-5h", kind: "session", label: "Gemini · 5-hour", usedPercent: 10 }],
++        } satisfies ServerProviderUsageLimits;
++        yield* Deferred.succeed(readResult, limits);
++        expect((yield* published)?.usageLimits).toEqual(limits);
++      }),
++  );
++
++  it.effect("skips duplicate republish when repeated probeFailed returns the same message", () =>
++    Effect.gen(function* () {
++      let tick = 0;
++      const harness = yield* makeHarness({
++        probeUsage: Effect.sync(() => ({
++          checkedAt: `2026-10-09T12:0${tick++}:00.000Z`,
++          windows: [],
++          unavailable: { reason: "probeFailed" as const, message: "expired" },
++        })),
++      });
++      const firstFailed = yield* harness.nextPublish(
++        (s) => s.usageLimits?.unavailable?.reason === "probeFailed",
++      );
++      yield* harness.initialize;
++      expect((yield* firstFailed)?.usageLimits?.checkedAt).toBe("2026-10-09T12:00:00.000Z");
++
++      const streamEvents = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
++      yield* harness.provider.snapshot.streamChanges.pipe(
++        Stream.runForEach((snapshot) => Ref.update(streamEvents, (all) => [...all, snapshot])),
++        Effect.forkChild,
++      );
++      yield* Effect.yieldNow;
++      yield* harness.provider.snapshot.refresh;
++      yield* Effect.yieldNow;
++      // Only the health check itself published; the identical probeFailed did not trigger a second republish.
++      const events = yield* Ref.get(streamEvents);
++      expect(events).toHaveLength(1);
++      expect(events[0]?.usageLimits?.checkedAt).toBe("2026-10-09T12:00:00.000Z");
++    }),
++  );
++
++  it.effect(
++    "clears old account limits on account switch even if the new account's first read fails before clearPublish runs",
++    () =>
++      Effect.gen(function* () {
++        const oldLimits: ServerProviderUsageLimits = {
++          checkedAt: "2026-10-09T12:00:00.000Z",
++          windows: [{ id: "gemini-5h", kind: "session", label: "Gemini · 5-hour", usedPercent: 70 }],
++        };
++        const usage = yield* Ref.make<ServerProviderUsageLimits>(oldLimits);
++        const harness = yield* makeHarness({ probeUsage: Ref.get(usage) });
++        const firstPublish = yield* harness.nextPublish((s) => !!s.usageLimits);
++        yield* harness.initialize;
++        expect((yield* firstPublish)?.usageLimits).toEqual(oldLimits);
++        yield* harness.provider.onSessionStarted(started, "/old");
++
++        // Hold refreshSemaphore inside an active health probe during account switch.
++        const probeEntered = yield* Deferred.make<void>();
++        const releaseProbe = yield* Deferred.make<EffectAcpSchema.InitializeResponse>();
++        yield* Ref.set(
++          harness.probe,
++          Deferred.succeed(probeEntered, undefined).pipe(Effect.andThen(Deferred.await(releaseProbe))),
++        );
++        const refresh = yield* harness.provider.snapshot.refresh.pipe(Effect.forkChild);
++        yield* Deferred.await(probeEntered);
++
++        const streamEvents = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
++        yield* harness.provider.snapshot.streamChanges.pipe(
++          Stream.runForEach((snapshot) => Ref.update(streamEvents, (all) => [...all, snapshot])),
++          Effect.forkChild,
++        );
++        yield* Effect.yieldNow;
++
++        // New account signs in and its first quota read returns probeFailed while refreshSemaphore is still held.
++        yield* Ref.set(usage, {
++          checkedAt: "2026-10-09T12:01:00.000Z",
++          windows: [],
++          unavailable: { reason: "probeFailed", message: "new account expired" },
++        });
++        yield* harness.provider.onSignedIn;
++        yield* harness.provider.onSessionStarted(started, "/new");
++        yield* Effect.yieldNow;
++
++        const failedPublish = yield* harness.nextPublish(
++          (s) => s.usageLimits?.unavailable?.reason === "probeFailed",
++        );
++        yield* Deferred.succeed(releaseProbe, initializeResult);
++        yield* Fiber.join(refresh);
++        const published = yield* failedPublish;
++        expect(published?.usageLimits?.unavailable?.reason).toBe("probeFailed");
++        expect(published?.usageLimits?.windows).toEqual([]);
++        // Every stream event for the new session must never carry the previous account's 70% quota.
++        const newSessionEvents = (yield* Ref.get(streamEvents)).filter((event) =>
++          event.workspaceSnapshots?.some((workspace) => workspace.cwd === "/new"),
++        );
++        expect(newSessionEvents.length).toBeGreaterThan(0);
++        for (const event of newSessionEvents) {
++          expect(event.usageLimits?.windows ?? []).toEqual([]);
++        }
++      }),
++  );
+ });
+ 
+ it.layer(makeLayerTest(true))("Antigravity periodic health checks", (it) => {
+@@ -1076,4 +1360,35 @@ it.layer(makeLayerTest(true))("Antigravity periodic health checks", (it) => {
+       expect(auth.at(-1)).toBe("unauthenticated");
+     }),
+   );
++
++  it.effect(
++    "clears previous account limits on onSignedIn even when a deferred failed periodic check runs",
++    () =>
++      Effect.gen(function* () {
++        const oldLimits: ServerProviderUsageLimits = {
++          checkedAt: "2026-10-09T12:00:00.000Z",
++          windows: [{ id: "3p-weekly", kind: "weekly", label: "Weekly", usedPercent: 40 }],
++        };
++        const harness = yield* makeHarness({ probeUsage: Effect.succeed(oldLimits) });
++        const firstPublish = yield* harness.nextPublish((s) => !!s.usageLimits);
++        yield* harness.initialize;
++        expect((yield* firstPublish)?.usageLimits).toEqual(oldLimits);
++        yield* harness.provider.onSessionStarted(started, "/workspace");
++
++        const failProbe = yield* Deferred.make<void>();
++        yield* Ref.set(
++          harness.probe,
++          Deferred.await(failProbe).pipe(
++            Effect.andThen(
++              Effect.fail(EffectAcpErrors.AcpRequestError.internalError("probe failed")),
++            ),
++          ),
++        );
++        const clearedPublish = yield* harness.nextPublish((s) => s.usageLimits === undefined);
++        yield* TestClock.adjust("5 minutes");
++        yield* harness.provider.onSignedIn;
++        yield* Deferred.succeed(failProbe, undefined);
++        expect((yield* clearedPublish)?.usageLimits).toBeUndefined();
++      }),
++  );
+ });
+diff --git a/apps/server/src/provider/AntigravityProvider.ts b/apps/server/src/provider/AntigravityProvider.ts
+index fccf11d663..be25bff118 100644
+--- a/apps/server/src/provider/AntigravityProvider.ts
++++ b/apps/server/src/provider/AntigravityProvider.ts
+@@ -8,13 +8,18 @@ import {
+   type ServerProvider,
+   type ServerProviderModel,
+   type ServerProviderSlashCommand,
++  type ServerProviderUsageLimits,
+ } from "@t3tools/contracts";
+ import { createModelCapabilities } from "@t3tools/shared/model";
++import * as Context from "effect/Context";
+ import * as DateTime from "effect/DateTime";
++import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+ import * as Equal from "effect/Equal";
++import * as FiberHandle from "effect/FiberHandle";
+ import * as Option from "effect/Option";
+ import * as Predicate from "effect/Predicate";
++import * as Ref from "effect/Ref";
+ import * as Result from "effect/Result";
+ import * as Stream from "effect/Stream";
+ import * as SubscriptionRef from "effect/SubscriptionRef";
+@@ -37,6 +42,7 @@ import {
+   isCommandMissingCause,
+   type ServerProviderDraft,
+ } from "@t3tools/provider-core/server/snapshotProbe";
++import { resolveUsageLimitsAfterProbe } from "@t3tools/provider-core/server/usageLimits";
+ 
+ import { antigravityThinkingConfig } from "./acp/AntigravityAcpSupport.ts";
+ 
+@@ -46,6 +52,25 @@ const HEALTH_CHECK_TIMEOUT_MS = 90_000;
+ const SIGN_IN_MESSAGE = "Sign in with Google to use Antigravity.";
+ const AUTH_UNCHECKED_MESSAGE =
+   "Antigravity is installed. Google account access is not checked yet.";
++// Set while a usage update or account clear republishes, so checkProvider skips options.probe
++// and does not trigger another quota read.
++const RepublishingSnapshot = Context.Reference<boolean>("t3/provider/AntigravityRepublishingSnapshot", {
++  defaultValue: () => false,
++});
++
++function sameUnavailableUsageLimits(
++  previous: ServerProviderUsageLimits | undefined,
++  next: ServerProviderUsageLimits | undefined,
++): boolean {
++  return (
++    previous?.unavailable !== undefined &&
++    next?.unavailable !== undefined &&
++    previous.windows.length === 0 &&
++    next.windows.length === 0 &&
++    previous.unavailable.reason === next.unavailable.reason &&
++    previous.unavailable.message === next.unavailable.message
++  );
++}
+ 
+ type SessionSetupResult = Pick<
+   AcpSessionRuntime.AcpSessionRuntimeStartResult["sessionSetupResult"],
+@@ -196,6 +221,8 @@ interface AntigravityProviderOptions {
+     EffectAcpErrors.AcpError | ProviderSetupError
+   >;
+   readonly supportsTextGeneration: Effect.Effect<boolean>;
++  readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
++  readonly clearUsage?: Effect.Effect<void>;
+   readonly maintenanceCapabilities?: ProviderMaintenanceCapabilities;
+   readonly auth?: { readonly type: string; readonly label: string };
+   /** Modes the last session advertised, saved because initialize alone does not report them. */
+@@ -298,8 +325,107 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+     Effect.flatMap((state) => options.stampIdentity(state.draft)),
+   );
+ 
++  // The quota read can take 30 seconds, so it never blocks readiness or a session start.
++  // One read runs at a time; sign-in and sign-out interrupt it and bump usageEpoch so a stale account never lands.
++  const usageRead = yield* FiberHandle.make();
++  const usageRepublish = yield* FiberHandle.make();
++  const clearPublish = yield* FiberHandle.make();
++  const republish = yield* Deferred.make<Effect.Effect<ServerProvider>>();
++  const staleManagedUsage = yield* Ref.make(false);
++  let usageEpoch = 0;
++
++  const scheduleClearPublish = FiberHandle.run(
++    clearPublish,
++    Deferred.await(republish).pipe(
++      Effect.flatten,
++      Effect.provideService(RepublishingSnapshot, true),
++      Effect.ignoreCause({ log: true }),
++    ),
++    { startImmediately: false },
++  ).pipe(Effect.asVoid);
++
++  const refreshUsage = Effect.fn("AntigravityProvider.refreshUsage")(function* () {
++    if (!options.probeUsage || (yield* RepublishingSnapshot)) return;
++    const startedEpoch = usageEpoch;
++    yield* FiberHandle.run(
++      usageRead,
++      options.probeUsage.pipe(
++        Effect.flatMap((probed) =>
++          SubscriptionRef.modify(metadata, (state) => {
++            if (usageEpoch !== startedEpoch || state.draft.auth.status === "unauthenticated") {
++              return [false, state] as const;
++            }
++            const nextUsage = resolveUsageLimitsAfterProbe({
++              published: state.draft.usageLimits,
++              probed,
++            });
++            if (
++              nextUsage === state.draft.usageLimits ||
++              sameUnavailableUsageLimits(state.draft.usageLimits, nextUsage)
++            ) {
++              return [false, state] as const;
++            }
++            return [
++              true,
++              {
++                ...state,
++                draft: {
++                  ...state.draft,
++                  usageLimits: nextUsage,
++                },
++              },
++            ] as const;
++          }),
++        ),
++        // Enrichment cannot change published limits; a republish check publishes them.
++        Effect.flatMap((changed) =>
++          changed && usageEpoch === startedEpoch
++            ? FiberHandle.run(
++                usageRepublish,
++                Deferred.await(republish).pipe(
++                  Effect.flatten,
++                  Effect.provideService(RepublishingSnapshot, true),
++                  Effect.ignoreCause({ log: true }),
++                ),
++                { startImmediately: false },
++              ).pipe(Effect.asVoid)
++            : Effect.void,
++        ),
++      ),
++      // Store the fiber before it runs, so a sign-out during the read can interrupt it.
++      { onlyIfMissing: true, startImmediately: false },
++    );
++  });
++
++  const resetUsage = Effect.gen(function* () {
++    usageEpoch++;
++    yield* FiberHandle.clear(usageRead);
++    yield* FiberHandle.clear(usageRepublish);
++    if (options.clearUsage) yield* options.clearUsage;
++  });
++
+   const checkProvider = Effect.fn("checkAntigravityProvider")(function* () {
+     if (!settings.enabled) return yield* getSnapshot;
++    if (yield* RepublishingSnapshot) {
++      const wasStale = yield* Ref.getAndSet(staleManagedUsage, false);
++      const snapshot = yield* getSnapshot;
++      if (wasStale && snapshot.usageLimits !== undefined) {
++        // Flush undefined first so managedProvider drops the previous account's limits before
++        // publishing the new epoch's limits (e.g. a probeFailed that landed before clearPublish ran).
++        yield* FiberHandle.run(
++          usageRepublish,
++          Deferred.await(republish).pipe(
++            Effect.flatten,
++            Effect.provideService(RepublishingSnapshot, true),
++            Effect.ignoreCause({ log: true }),
++          ),
++          { startImmediately: false },
++        );
++        const { usageLimits: _pendingNewEpoch, ...cleared } = snapshot;
++        return cleared;
++      }
++      return snapshot;
++    }
+     const before = yield* SubscriptionRef.get(metadata);
+     const timeoutMs = resolveProviderProbeTimeoutMs(
+       "antigravity",
+@@ -345,6 +471,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+           version: version === "unknown" ? draft.version : version || draft.version,
+           status: errorMessage ? "error" : authenticated ? "ready" : "warning",
+           checkedAt: updatedAt,
++          usageLimits: missingInstallation ? undefined : draft.usageLimits,
+           ...(missingInstallation
+             ? {
+                 models: [],
+@@ -371,7 +498,21 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+       const stored = deferFailure && state.draft.status === "ready" ? state : checked;
+       return [checked, stored === state ? Option.none() : Option.some(stored)];
+     });
+-    return yield* options.stampIdentity(next.draft);
++    if (
++      initialized !== undefined &&
++      next.authRevision === before.authRevision &&
++      next.draft.auth.status !== "unauthenticated"
++    ) {
++      yield* refreshUsage();
++    }
++    const stamped = yield* options.stampIdentity(next.draft);
++    // While a sign-out or account-switch clear is still pending, never let a normal check hand
++    // a new epoch's probeFailed to managedProvider while it still holds the old account's limits.
++    if (yield* Ref.get(staleManagedUsage)) {
++      const { usageLimits: _stale, ...cleared } = stamped;
++      return cleared;
++    }
++    return stamped;
+   });
+ 
+   const maintenanceCapabilities =
+@@ -390,10 +531,17 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+     enrichSnapshot: ({ publishSnapshot }) =>
+       SubscriptionRef.changes(metadata).pipe(
+         Stream.runForEach((state) =>
+-          options.stampIdentity(state.draft).pipe(Effect.flatMap(publishSnapshot)),
++          Ref.get(staleManagedUsage).pipe(
++            Effect.flatMap((stale) =>
++              stale
++                ? Effect.void
++                : options.stampIdentity(state.draft).pipe(Effect.flatMap(publishSnapshot)),
++            ),
++          ),
+         ),
+       ),
+   });
++  yield* Deferred.succeed(republish, managed.refresh);
+ 
+   const onSessionStarted = Effect.fn("AntigravityProvider.onSessionStarted")(function* (
+     started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+@@ -461,6 +609,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+       return [draft.supportedRuntimeModes, next] as const;
+     });
+     yield* rememberRuntimeModes(previousModes, supportedRuntimeModes);
++    if (!before.draft.usageLimits || before.draft.usageLimits.unavailable) yield* refreshUsage();
+   });
+ 
+   const onConfigOptionsUpdated = Effect.fn("AntigravityProvider.onConfigOptionsUpdated")(function* (
+@@ -520,7 +669,9 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+   });
+ 
+   const clearAccountMetadata = Effect.fn("AntigravityProvider.clearAccountMetadata")(function* () {
++    yield* resetUsage;
+     if (!settings.enabled) return;
++    yield* Ref.set(staleManagedUsage, true);
+     const updatedAt = DateTime.formatIso(yield* DateTime.now);
+     const previousModes = yield* SubscriptionRef.modify(metadata, (state) => [
+       state.draft.supportedRuntimeModes,
+@@ -541,6 +692,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+           workspaceSnapshots: [],
+           supportedRuntimeModes: RUNTIME_MODES_WITHOUT_AUTO,
+           supportsTextGeneration: false,
++          usageLimits: undefined,
+         },
+       } satisfies AntigravityProviderState,
+     ]);
+@@ -549,6 +701,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+     workspaceCommands.clear();
+     thinkingLevels.clear();
+     defaultModelSlug = undefined;
++    yield* scheduleClearPublish;
+   });
+ 
+   const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* (
+@@ -587,6 +740,19 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+     onSessionStarted,
+     onConfigOptionsUpdated,
+     onAvailableCommands,
++    // The new sign-in may be another account. Clear and republish its limits so a failed read
++    // cannot fall back to them; the session start then reads the new account's limits.
++    onSignedIn: resetUsage.pipe(
++      Effect.andThen(Ref.set(staleManagedUsage, true)),
++      Effect.andThen(
++        SubscriptionRef.update(metadata, (state) => {
++          const { usageLimits: _previousAccount, ...draft } = state.draft;
++          return { ...state, draft };
++        }),
++      ),
++      Effect.andThen(scheduleClearPublish),
++      Effect.asVoid,
++    ),
+     onSignedOut: clearAccountMetadata(),
+     onAuthRequired: clearAccountMetadata(),
+     snapshotForCwd,
+diff --git a/apps/server/src/provider/Drivers/AntigravityDriver.test.ts b/apps/server/src/provider/Drivers/AntigravityDriver.test.ts
+index c4b7cf3f99..19451dd10c 100644
+--- a/apps/server/src/provider/Drivers/AntigravityDriver.test.ts
++++ b/apps/server/src/provider/Drivers/AntigravityDriver.test.ts
+@@ -26,6 +26,7 @@ import * as Redacted from "effect/Redacted";
+ import * as Schema from "effect/Schema";
+ import * as Stream from "effect/Stream";
+ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
++import { HttpClient } from "effect/http";
+ 
+ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+ import * as ServerConfig from "../../config.ts";
+@@ -291,6 +292,12 @@ const layerDeps = ServerConfig.layerTest(process.cwd(), {
+   prefix: "t3-antigravity-driver-config-",
+ }).pipe(
+   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
++  Layer.provideMerge(
++    Layer.succeed(
++      HttpClient.HttpClient,
++      HttpClient.make(() => Effect.die("Unexpected quota request")),
++    ),
++  ),
+   Layer.provideMerge(ServerSettings.layerTest()),
+   Layer.provideMerge(
+     Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+diff --git a/apps/server/src/provider/Drivers/AntigravityDriver.ts b/apps/server/src/provider/Drivers/AntigravityDriver.ts
+index 4d0af3d990..36c8e68123 100644
+--- a/apps/server/src/provider/Drivers/AntigravityDriver.ts
++++ b/apps/server/src/provider/Drivers/AntigravityDriver.ts
+@@ -27,6 +27,7 @@ import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ import * as ChildProcess from "effect/process/ChildProcess";
+ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
++import { HttpClient } from "effect/http";
+ import * as AcpErrors from "effect-acp/errors";
+ 
+ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+@@ -70,6 +71,7 @@ import {
+ import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
+ import { ProviderDriverError } from "../Errors.ts";
+ import { makeAntigravityProvider } from "../AntigravityProvider.ts";
++import { makeAntigravityUsageProbe } from "../antigravityUsageLimits.ts";
+ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+ import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
+ import {
+@@ -113,6 +115,7 @@ export type AntigravityDriverEnv =
+   | Digest.Digest
+   | SecureRandom.SecureRandom
+   | FileSystem.FileSystem
++  | HttpClient.HttpClient
+   | IdAllocator.IdAllocatorV2
+   | McpProviderSessions.McpProviderSessions
+   | ModelCatalog.ModelCatalog
+@@ -140,6 +143,7 @@ export const AntigravityDriver: ProviderDriver<
+     const digest = yield* Digest.Digest;
+     const random = yield* SecureRandom.SecureRandom;
+     const fileSystem = yield* FileSystem.FileSystem;
++    const httpClient = yield* HttpClient.HttpClient;
+     const path = yield* Path.Path;
+     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+     const host = yield* ProviderHost.ProviderHost;
+@@ -523,7 +527,11 @@ export const AntigravityDriver: ProviderDriver<
+     const authFlow: AntigravityAuth = yield* makeAntigravityAuth({
+       instanceId,
+       makeRuntime: makeDisposableRuntime,
+-      onAuthenticated: publishCatalog,
++      // A new sign-in may be another account; drop any in-flight quota read first.
++      onAuthenticated: (started, runtime) =>
++        Effect.suspend(() => provider.onSignedIn).pipe(
++          Effect.andThen(publishCatalog(started, runtime)),
++        ),
+       onSignedOut: Effect.suspend(() => provider.onSignedOut),
+       usesBrowser: antigravityAuthUsesBrowser(auth.authMethod),
+       codeLogin,
+@@ -568,10 +576,21 @@ export const AntigravityDriver: ProviderDriver<
+       };
+     });
+ 
++    const usage = yield* makeAntigravityUsageProbe({
++      profileDirectory,
++      authMethod: auth.authMethod,
++    }).pipe(
++      Effect.provideService(FileSystem.FileSystem, fileSystem),
++      Effect.provideService(Path.Path, path),
++      Effect.provideService(Digest.Digest, digest),
++      Effect.provideService(HttpClient.HttpClient, httpClient),
++    );
+     const provider = yield* makeAntigravityProvider(settings, {
+       environment: processEnvironment,
+       stampIdentity: classifyModels,
+       probe,
++      probeUsage: usage.probe,
++      clearUsage: usage.clear,
+       auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
+       ...(rememberedRuntimeModes ? { rememberedRuntimeModes } : {}),
+       rememberRuntimeModes: (modes) =>
+diff --git a/apps/server/src/provider/antigravityUsageLimits.test.ts b/apps/server/src/provider/antigravityUsageLimits.test.ts
+new file mode 100644
+index 0000000000..a5937146cf
+--- /dev/null
++++ b/apps/server/src/provider/antigravityUsageLimits.test.ts
+@@ -0,0 +1,396 @@
++import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import * as HostProcess from "@t3tools/shared/HostProcess";
++import { describe, expect, it } from "@effect/vitest";
++import * as Context from "effect/Context";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
++import * as TestClock from "effect/testing/TestClock";
++import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
++
++import { makeAntigravityUsageProbe } from "./antigravityUsageLimits.ts";
++
++const summary = {
++  groups: [
++    {
++      displayName: "Gemini Models",
++      buckets: [
++        {
++          bucketId: "gemini-weekly",
++          window: "weekly",
++          remainingFraction: 0.96,
++          resetTime: "2026-10-12T19:41:43Z",
++        },
++        {
++          bucketId: "gemini-5h",
++          window: "5h",
++          remainingFraction: 0.91,
++          resetTime: "2026-10-09T16:06:01Z",
++        },
++      ],
++    },
++    {
++      displayName: "Claude and GPT models",
++      buckets: [
++        {
++          bucketId: "3p-weekly",
++          window: "weekly",
++          remainingFraction: 0,
++          resetTime: "2026-10-10T15:28:22Z",
++        },
++        {
++          bucketId: "3p-5h",
++          window: "5h",
++          remainingFraction: 0.44,
++          resetTime: "2026-10-09T16:06:30Z",
++        },
++      ],
++    },
++  ],
++};
++
++const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
++  options: {
++    summary?: unknown;
++    summaryByHost?: Record<string, unknown>;
++    models?: unknown;
++    summaryStatus?: number;
++    summaryStatusByHost?: Record<string, number>;
++    tokenStatus?: number;
++    refreshToken?: string;
++    userId?: string | (() => string | undefined);
++    missingToken?: boolean;
++    cliToken?: {
++      readonly access_token: string;
++      readonly refresh_token?: string;
++      readonly expiry?: string;
++    };
++    authMethod?: "oauth-personal" | "oauth-business" | "gemini-api-key";
++  } = {},
++) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const profileDirectory = yield* fs.makeTempDirectoryScoped();
++  yield* fs.makeDirectory(path.join(profileDirectory, "antigravity-acp"));
++  const tokenPath = path.join(profileDirectory, "antigravity-acp", "acp_token.json");
++  const cliTokenPath = path.join(profileDirectory, "antigravity-acp", "antigravity-oauth-token");
++  const writeToken = (refreshToken: string) =>
++    fs.writeFileString(
++      tokenPath,
++      JSON.stringify({
++        client_id: "client-id",
++        client_secret: "client-secret",
++        refresh_token: refreshToken,
++        project_id: "project-id",
++      }),
++    );
++  const writeCliToken = (token: {
++    readonly access_token: string;
++    readonly refresh_token?: string;
++    readonly expiry?: string;
++  }) => fs.writeFileString(cliTokenPath, JSON.stringify({ token }));
++
++  if (options.cliToken) {
++    yield* writeCliToken(options.cliToken);
++  } else if (!options.missingToken) {
++    yield* writeToken(options.refreshToken ?? "refresh-a");
++  }
++
++  const requests: Array<{ url: string; body: string }> = [];
++  const http = HttpClient.make((request, url, _signal, fiber) =>
++    Effect.sync(() => {
++      const init = Context.getOrUndefined(fiber.context, FetchHttpClient.RequestInit);
++      expect(init?.redirect).toBe("manual");
++      const body =
++        request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
++      requests.push({ url: request.url, body });
++      if (request.url.endsWith("/token")) {
++        expect(new URLSearchParams(body).get("grant_type")).toBe("refresh_token");
++        return HttpClientResponse.fromWeb(
++          request,
++          Response.json(
++            { access_token: "access-token", expires_in: 3600 },
++            { status: options.tokenStatus ?? 200 },
++          ),
++        );
++      }
++      expect(request.headers.authorization).toBe(
++        `Bearer ${options.cliToken?.access_token ?? "access-token"}`,
++      );
++      if (request.url.endsWith("/userinfo")) {
++        const userId =
++          typeof options.userId === "function" ? options.userId() : options.userId;
++        return HttpClientResponse.fromWeb(
++          request,
++          userId
++            ? Response.json({ id: userId, email: "someone@example.com" })
++            : Response.json({}, { status: 403 }),
++        );
++      }
++      expect(JSON.parse(body)).toEqual(
++        options.cliToken || options.missingToken ? {} : { project: "project-id" },
++      );
++      expect(request.headers["user-agent"]).toMatch(/^antigravity\/hub\/2\.24\.0 /);
++      return HttpClientResponse.fromWeb(
++        request,
++        request.url.endsWith(":retrieveUserQuotaSummary")
++          ? Response.json(options.summaryByHost?.[url.host] ?? options.summary ?? summary, {
++              status: options.summaryStatusByHost?.[url.host] ?? options.summaryStatus ?? 200,
++            })
++          : Response.json(options.models ?? { models: {} }),
++      );
++    }),
++  );
++
++  const usage = yield* makeAntigravityUsageProbe({
++    profileDirectory,
++    authMethod: options.authMethod ?? "oauth-personal",
++  }).pipe(Effect.provideService(HttpClient.HttpClient, http));
++
++  return { ...usage, requests, writeToken, writeCliToken, tokenPath, cliTokenPath };
++});
++
++const layerTest = Layer.mergeAll(
++  NodeServices.layer,
++  NodeCrypto.layer,
++  Layer.succeed(HostProcess.Platform, "linux"),
++  Layer.succeed(HostProcess.Architecture, "x64"),
++);
++
++it.layer(layerTest)("Antigravity subscription limits", (it) => {
++  it.effect("omits rolling resets for untouched summary buckets and keeps used Gemini resets", () =>
++    Effect.gen(function* () {
++      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:16:04Z")));
++      const { probe } = yield* fixture({
++        summary: {
++          groups: [
++            {
++              buckets: [
++                {
++                  bucketId: "3p-5h",
++                  window: "5h",
++                  remainingFraction: 1,
++                  resetTime: "2026-10-21T15:16:04Z",
++                },
++                {
++                  bucketId: "gemini-5h",
++                  window: "5h",
++                  remainingFraction: 0.75,
++                  resetTime: "2026-10-21T15:10:00Z",
++                },
++              ],
++            },
++          ],
++        },
++      });
++      const limits = yield* probe;
++      expect(limits.unavailable).toBeUndefined();
++      expect(limits.windows).toEqual([
++        {
++          id: "3p-5h",
++          label: "Claude & GPT (shared) · 5-hour",
++          kind: "session",
++          usedPercent: 0,
++          windowDurationMins: 300,
++        },
++        {
++          id: "gemini-5h",
++          label: "Gemini · 5-hour",
++          kind: "session",
++          usedPercent: 25,
++          resetsAt: "2026-10-21T15:10:00.000Z",
++          windowDurationMins: 300,
++        },
++      ]);
++    }),
++  );
++
++  it.effect(
++    "reads antigravity-oauth-token, caches successful userinfo, retries transient failures, and resets on clear",
++    () =>
++      Effect.gen(function* () {
++        yield* TestClock.setTime(
++          DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:00:00Z")),
++        );
++        let userInfoCalls = 0;
++        let resolvedUserId: string | undefined = undefined;
++        const { probe, clear, requests } = yield* fixture({
++          cliToken: {
++            access_token: "cli-access-1",
++            refresh_token: "cli-refresh-1",
++            expiry: "2026-10-21T11:00:00Z",
++          },
++          userId: () => {
++            userInfoCalls++;
++            return resolvedUserId;
++          },
++        });
++
++        // First read: userinfo fails transiently; fallback fingerprint must NOT be cached.
++        const first = yield* probe;
++        expect(first.unavailable).toBeUndefined();
++        expect(first.windows).toHaveLength(4);
++        expect(userInfoCalls).toBe(1);
++
++        // Second read: userinfo succeeds and gets cached.
++        resolvedUserId = "google-user-42";
++        const second = yield* probe;
++        expect(second.credentialFingerprint).toBeDefined();
++        expect(second.credentialFingerprint).not.toBe(first.credentialFingerprint);
++        expect(userInfoCalls).toBe(2);
++
++        // Third read: userinfo is served from cache with zero /userinfo HTTP requests.
++        const beforeCachedCount = requests.filter((r) => r.url.endsWith("/userinfo")).length;
++        const third = yield* probe;
++        expect(third.credentialFingerprint).toBe(second.credentialFingerprint);
++        expect(requests.filter((r) => r.url.endsWith("/userinfo")).length).toBe(beforeCachedCount);
++
++        // clear() drops the cached fingerprint so the next read fetches /userinfo again.
++        yield* clear;
++        const fourth = yield* probe;
++        expect(fourth.credentialFingerprint).toBe(second.credentialFingerprint);
++        expect(userInfoCalls).toBe(3);
++      }),
++  );
++
++  it.effect("returns probeFailed when antigravity-oauth-token is within 60 seconds of expiry", () =>
++    Effect.gen(function* () {
++      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:59:30Z")));
++      const { probe, requests } = yield* fixture({
++        cliToken: {
++          access_token: "cli-access-1",
++          expiry: "2026-10-21T11:00:00Z",
++        },
++      });
++      const limits = yield* probe;
++      expect(limits.unavailable?.reason).toBe("probeFailed");
++      expect(limits.windows).toEqual([]);
++      expect(requests).toEqual([]);
++    }),
++  );
++
++  it.effect(
++    "returns unsupported when no token file exists for oauth-personal, oauth-business, or gemini-api-key",
++    () =>
++      Effect.gen(function* () {
++        for (const authMethod of ["oauth-personal", "oauth-business", "gemini-api-key"] as const) {
++          const { probe, requests } = yield* fixture({ missingToken: true, authMethod });
++          const limits = yield* probe;
++          expect(limits.unavailable?.reason).toBe("unsupported");
++          expect(requests).toEqual([]);
++        }
++      }),
++  );
++
++  it.effect("refreshes acp_token.json and retries userinfo after a transient failure", () =>
++    Effect.gen(function* () {
++      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:00:00Z")));
++      let resolvedUserId: string | undefined = undefined;
++      const { probe, requests } = yield* fixture({
++        userId: () => resolvedUserId,
++      });
++
++      const first = yield* probe;
++      expect(first.windows).toHaveLength(4);
++      expect(requests.filter((r) => r.url.endsWith("/token"))).toHaveLength(1);
++      expect(requests.filter((r) => r.url.endsWith("/userinfo"))).toHaveLength(1);
++
++      resolvedUserId = "google-user-99";
++      const second = yield* probe;
++      expect(second.credentialFingerprint).not.toBe(first.credentialFingerprint);
++      expect(requests.filter((r) => r.url.endsWith("/token"))).toHaveLength(1);
++      expect(requests.filter((r) => r.url.endsWith("/userinfo"))).toHaveLength(2);
++
++      // Once verified, /userinfo is not called again while the token is cached.
++      const third = yield* probe;
++      expect(third.credentialFingerprint).toBe(second.credentialFingerprint);
++      expect(requests.filter((r) => r.url.endsWith("/userinfo"))).toHaveLength(2);
++    }),
++  );
++
++  it.effect(
++    "falls back to fetchAvailableModels with hyphenated slug ids separating Argon, Carbon, Gemini, Claude, and GPT",
++    () =>
++      Effect.gen(function* () {
++        yield* TestClock.setTime(
++          DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:00:00Z")),
++        );
++        const { probe } = yield* fixture({
++          summaryStatus: 404,
++          models: {
++            models: {
++              "gemini-4-argon": {
++                modelProvider: "MODEL_PROVIDER_GOOGLE",
++                quotaInfo: { remainingFraction: 0, resetTime: "2026-10-21T15:00:00Z" },
++                weeklyQuotaInfo: { remainingFraction: 0.25, resetTime: "2026-10-28T00:00:00Z" },
++              },
++              "gemini-4-carbon": {
++                modelProvider: "MODEL_PROVIDER_GOOGLE",
++                quotaInfo: { remainingFraction: 0.8, resetTime: "2026-10-21T15:00:00Z" },
++              },
++              "gemini-4-neon": {
++                modelProvider: "MODEL_PROVIDER_GOOGLE",
++                quotaInfo: { remainingFraction: 0.6, resetTime: "2026-10-21T15:00:00Z" },
++              },
++              "claude-opus-5-5": {
++                modelProvider: "MODEL_PROVIDER_ANTHROPIC",
++                quotaInfo: { remainingFraction: 0.5, resetTime: "2026-10-21T15:00:00Z" },
++              },
++              "gpt-5": {
++                modelProvider: "MODEL_PROVIDER_OPENAI",
++                quotaInfo: { remainingFraction: 0.9, resetTime: "2026-10-21T15:00:00Z" },
++              },
++            },
++          },
++        });
++        const limits = yield* probe;
++        expect(limits.unavailable).toBeUndefined();
++        expect(limits.windows.map((w) => [w.id, w.label, Math.round(w.usedPercent)])).toEqual([
++          ["gemini-argon-weekly", "Gemini Argon · Weekly", 75],
++          ["claude-quota", "Claude · Reported quota", 50],
++          ["gemini-argon-quota", "Gemini Argon · Reported quota", 100],
++          ["gemini-carbon-quota", "Gemini Carbon · Reported quota", 20],
++          ["gemini-quota", "Gemini · Reported quota", 40],
++          ["gpt-quota", "GPT · Reported quota", 10],
++        ]);
++      }),
++  );
++
++  it.effect("prefers antigravity-oauth-token over a leftover acp_token.json", () =>
++    Effect.gen(function* () {
++      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:00:00Z")));
++      const { probe, writeToken, requests } = yield* fixture({
++        cliToken: {
++          access_token: "cli-current-token",
++          refresh_token: "cli-refresh-current",
++          expiry: "2026-10-21T11:00:00Z",
++        },
++        userId: "current-cli-user",
++        summary: {
++          groups: [
++            {
++              buckets: [
++                {
++                  bucketId: "gemini-5h",
++                  window: "5h",
++                  remainingFraction: 0.8,
++                  resetTime: "2026-10-21T14:00:00Z",
++                },
++              ],
++            },
++          ],
++        },
++      });
++      // Leave an old acp_token.json alongside antigravity-oauth-token.
++      yield* writeToken("stale-acp-refresh");
++      const limits = yield* probe;
++      expect(limits.unavailable).toBeUndefined();
++      expect(limits.windows[0]?.usedPercent).toBeCloseTo(20);
++      // Must NOT refresh acp_token.json when antigravity-oauth-token is present.
++      expect(requests.filter((r) => r.url.endsWith("/token"))).toEqual([]);
++    }),
++  );
++});
+diff --git a/apps/server/src/provider/antigravityUsageLimits.ts b/apps/server/src/provider/antigravityUsageLimits.ts
+new file mode 100644
+index 0000000000..40f2a7a8e5
+--- /dev/null
++++ b/apps/server/src/provider/antigravityUsageLimits.ts
+@@ -0,0 +1,440 @@
++import type { AntigravitySettings, ServerProviderUsageWindow } from "@t3tools/contracts";
++import * as HostProcess from "@t3tools/shared/HostProcess";
++import * as Clock from "effect/Clock";
++import * as Digest from "effect/crypto/Digest";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Option from "effect/Option";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
++
++import {
++  makeUnavailableUsageLimits,
++  makeUsageLimits,
++} from "@t3tools/provider-core/server/usageLimits";
++
++export function antigravityUserAgent(platform: NodeJS.Platform, architecture: NodeJS.Architecture) {
++  return `antigravity/hub/2.24.0 (aidev_client; os_type=${platform}; arch=${architecture}; cl=963137146)`;
++}
++
++const DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
++const PROD_ENDPOINT = "https://cloudcode-pa.googleapis.com";
++// The ACP runtime meters consumer tiers on the daily host and GCP-terms tiers on prod.
++// The sign-in method stands in for the tier.
++const ENDPOINTS = {
++  "oauth-personal": [DAILY_ENDPOINT, PROD_ENDPOINT],
++  "oauth-business": [PROD_ENDPOINT, DAILY_ENDPOINT],
++};
++const SUMMARY_WINDOW_MINS = new Map([
++  ["5h", 5 * 60],
++  ["weekly", 7 * 24 * 60],
++]);
++const MANUAL_REDIRECT: RequestInit = { redirect: "manual" };
++const TokenFile = Schema.Struct({
++  client_id: Schema.NonEmptyString,
++  client_secret: Schema.NonEmptyString,
++  refresh_token: Schema.NonEmptyString,
++  project_id: Schema.optional(Schema.String),
++});
++// The 1.5.x CLI writes antigravity-oauth-token on disk without an OAuth client, so T3 cannot refresh it.
++const CliToken = Schema.Struct({
++  token: Schema.Struct({
++    access_token: Schema.NonEmptyString,
++    refresh_token: Schema.optional(Schema.String),
++    expiry: Schema.optional(Schema.String),
++  }),
++});
++const TokenResponse = Schema.Struct({
++  access_token: Schema.NonEmptyString,
++  expires_in: Schema.Number.check(Schema.isGreaterThan(0)),
++});
++const UserInfo = Schema.Struct({ id: Schema.NonEmptyString });
++const Quota = Schema.Struct({
++  remainingFraction: Schema.optional(Schema.Number),
++  resetTime: Schema.optional(Schema.String),
++});
++const Bucket = Schema.Struct({
++  ...Quota.fields,
++  bucketId: Schema.NonEmptyString,
++  window: Schema.optional(Schema.String),
++  displayName: Schema.optional(Schema.String),
++  description: Schema.optional(Schema.String),
++  disabled: Schema.optional(Schema.Boolean),
++});
++const Summary = Schema.Struct({
++  groups: Schema.optional(
++    Schema.Array(
++      Schema.Struct({
++        displayName: Schema.optional(Schema.String),
++        buckets: Schema.optional(Schema.Array(Bucket)),
++      }),
++    ),
++  ),
++  buckets: Schema.optional(Schema.Array(Bucket)),
++});
++const Models = Schema.Struct({
++  models: Schema.Record(
++    Schema.String,
++    Schema.Struct({
++      modelProvider: Schema.optional(Schema.String),
++      quotaInfo: Schema.optional(Quota),
++      weeklyQuotaInfo: Schema.optional(Quota),
++    }),
++  ),
++});
++
++const decodeTokenFile = Schema.decodeEffect(Schema.fromJsonString(TokenFile));
++const decodeCliToken = Schema.decodeEffect(Schema.fromJsonString(CliToken));
++const decodeTokenResponse = Schema.decodeUnknownEffect(TokenResponse);
++const decodeUserInfo = Schema.decodeUnknownEffect(UserInfo);
++const decodeSummary = Schema.decodeUnknownEffect(Summary);
++const decodeModels = Schema.decodeUnknownEffect(Models);
++
++function iso(value: string | undefined): string | undefined {
++  const parsed = value ? DateTime.make(value) : Option.none();
++  return Option.isSome(parsed) ? DateTime.formatIso(parsed.value) : undefined;
++}
++
++function quotaWindow(
++  id: string,
++  label: string,
++  quota: typeof Quota.Type,
++  kind: ServerProviderUsageWindow["kind"] = "other",
++  windowDurationMins?: number,
++): ServerProviderUsageWindow | undefined {
++  if (quota.remainingFraction === undefined || !Number.isFinite(quota.remainingFraction)) {
++    return undefined;
++  }
++  const resetsAt = iso(quota.resetTime);
++  return {
++    id,
++    label,
++    kind,
++    usedPercent: (1 - Math.max(0, Math.min(1, quota.remainingFraction))) * 100,
++    ...(resetsAt ? { resetsAt } : {}),
++    ...(windowDurationMins === undefined ? {} : { windowDurationMins }),
++  };
++}
++
++function summaryResetTime(
++  bucket: typeof Bucket.Type,
++  windowDurationMins: number | undefined,
++  requestedAt: number,
++): string | undefined {
++  // Untouched summary buckets report a rolling full-window reset.
++  const untouched =
++    bucket.remainingFraction === 1 &&
++    bucket.description === undefined &&
++    windowDurationMins !== undefined &&
++    Math.abs(Date.parse(bucket.resetTime ?? "") - requestedAt - windowDurationMins * 60_000) <=
++      60_000;
++  return untouched ? undefined : bucket.resetTime;
++}
++
++const sha256 = Effect.fnUntraced(function* (text: string) {
++  const digest = yield* (yield* Digest.Digest).digest(
++    Digest.sha256,
++    new TextEncoder().encode(text),
++  );
++  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
++});
++
++/** Keys an account by its Google ID, which matches across machines; refresh tokens do not. */
++export const antigravityAccountFingerprint = (userInfo: unknown) =>
++  decodeUserInfo(userInfo).pipe(Effect.flatMap((info) => sha256(`google-account\0${info.id}`)));
++
++/** Windows from a `retrieveUserQuotaSummary` answer requested at `requestedAt`. */
++export const antigravitySummaryWindows = (response: unknown, requestedAt: number) =>
++  decodeSummary(response).pipe(Effect.map((summary) => summaryWindows(summary, requestedAt)));
++
++function summaryWindows(summary: typeof Summary.Type, requestedAt: number) {
++  const windows = new Map<string, ServerProviderUsageWindow>();
++  const groups = summary.groups?.some((group) => group.buckets?.length)
++    ? summary.groups
++    : [{ buckets: summary.buckets }];
++  for (const group of groups ?? []) {
++    for (const bucket of group.buckets ?? []) {
++      if (bucket.disabled) continue;
++      // Argon and Carbon are metered separately from the default Gemini buckets.
++      const family = bucket.bucketId.startsWith("gemini-argon-")
++        ? group.displayName?.trim() || "Gemini Argon"
++        : bucket.bucketId.startsWith("gemini-carbon-")
++          ? group.displayName?.trim() || "Gemini Carbon"
++          : bucket.bucketId.startsWith("gemini-")
++            ? "Gemini"
++            : bucket.bucketId.startsWith("3p-")
++              ? "Claude & GPT (shared)"
++              : group.displayName?.trim() || bucket.bucketId;
++      const weekly = bucket.window === "weekly";
++      const session = bucket.window === "5h";
++      const windowDurationMins = SUMMARY_WINDOW_MINS.get(bucket.window ?? "");
++      const window = quotaWindow(
++        bucket.bucketId,
++        `${family} · ${weekly ? "Weekly" : session ? "5-hour" : bucket.displayName?.trim() || "Quota"}`,
++        { ...bucket, resetTime: summaryResetTime(bucket, windowDurationMins, requestedAt) },
++        weekly ? "weekly" : session ? "session" : "other",
++        windowDurationMins,
++      );
++      if (window) windows.set(window.id, window);
++    }
++  }
++  return [...windows.values()];
++}
++
++function modelFamily(
++  modelId: string,
++  modelProvider: string | undefined,
++): { readonly slug: string; readonly label: string } | undefined {
++  const normalized = modelId.toLowerCase();
++  if (modelProvider === "MODEL_PROVIDER_GOOGLE" || normalized.startsWith("gemini-")) {
++    if (normalized.includes("argon")) return { slug: "gemini-argon", label: "Gemini Argon" };
++    if (normalized.includes("carbon")) return { slug: "gemini-carbon", label: "Gemini Carbon" };
++    return { slug: "gemini", label: "Gemini" };
++  }
++  if (modelProvider === "MODEL_PROVIDER_ANTHROPIC" || normalized.startsWith("claude-")) {
++    return { slug: "claude", label: "Claude" };
++  }
++  if (modelProvider === "MODEL_PROVIDER_OPENAI" || normalized.startsWith("gpt-")) {
++    return { slug: "gpt", label: "GPT" };
++  }
++  return undefined;
++}
++
++/** Older accounts expose model quotas without a window length. Do not invent a reset cadence. */
++function modelWindows(models: typeof Models.Type) {
++  const windows = new Map<string, ServerProviderUsageWindow>();
++  for (const [modelId, model] of Object.entries(models.models)) {
++    const family = modelFamily(modelId, model.modelProvider);
++    if (!family) continue;
++    for (const [suffix, quota] of [
++      ["quota", model.quotaInfo],
++      ["weekly", model.weeklyQuotaInfo],
++    ] as const) {
++      if (!quota) continue;
++      const window = quotaWindow(
++        `${family.slug}-${suffix}`,
++        `${family.label} · ${suffix === "weekly" ? "Weekly" : "Reported quota"}`,
++        quota,
++        suffix === "weekly" ? "weekly" : "other",
++        suffix === "weekly" ? 7 * 24 * 60 : undefined,
++      );
++      if (!window) continue;
++      const previous = windows.get(window.id);
++      if (!previous || window.usedPercent > previous.usedPercent) windows.set(window.id, window);
++    }
++  }
++  return [...windows.values()];
++}
++
++export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
++  readonly profileDirectory: string;
++  readonly authMethod: AntigravitySettings["authMethod"];
++}) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
++  const crypto = yield* Digest.Digest;
++  const platform = yield* HostProcess.Platform;
++  const architecture = yield* HostProcess.Architecture;
++  const tokenPath = path.join(input.profileDirectory, "antigravity-acp", "acp_token.json");
++  const cliTokenPath = path.join(
++    input.profileDirectory,
++    "antigravity-acp",
++    "antigravity-oauth-token",
++  );
++  let cached:
++    | {
++        fingerprint: string;
++        account: string;
++        accountVerified: boolean;
++        accessToken: string;
++        expiresAt: number;
++      }
++    | undefined;
++  let cliAccountCache: { tokenHash: string; account: string } | undefined;
++  let generation = 0;
++
++  const request = (request: HttpClientRequest.HttpClientRequest) =>
++    client.execute(request).pipe(
++      Effect.provideService(FetchHttpClient.RequestInit, MANUAL_REDIRECT),
++      Effect.flatMap((response) => response.json),
++      Effect.timeout("10 seconds"),
++    );
++
++  const fetchGoogleAccount = (accessToken: string) =>
++    request(
++      HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
++        HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
++      ),
++    ).pipe(Effect.flatMap(antigravityAccountFingerprint), Effect.option);
++
++  const read = Effect.gen(function* () {
++    const startedGeneration = generation;
++    const checkedAt = DateTime.formatIso(yield* DateTime.now);
++    if (input.authMethod !== "oauth-personal" && input.authMethod !== "oauth-business") {
++      return makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
++    }
++    const now = yield* Clock.currentTimeMillis;
++    let accessToken: string;
++    let account: string;
++    let projectId: string | undefined;
++    if (yield* fs.exists(cliTokenPath)) {
++      cached = undefined;
++      const stored = yield* fs.readFileString(cliTokenPath);
++      const { token } = yield* decodeCliToken(stored);
++      if (!(Date.parse(token.expiry ?? "") > now + 60_000)) {
++        return makeUnavailableUsageLimits({
++          checkedAt,
++          reason: "probeFailed",
++          message:
++            "Antigravity's saved sign-in has expired. Start an Antigravity turn to renew it, then refresh limits.",
++        });
++      }
++      accessToken = token.access_token;
++      const tokenHash = yield* sha256(token.refresh_token || accessToken);
++      if (cliAccountCache?.tokenHash === tokenHash) {
++        account = cliAccountCache.account;
++      } else {
++        const fetched = yield* fetchGoogleAccount(accessToken);
++        if (Option.isSome(fetched)) {
++          account = fetched.value;
++          if (generation === startedGeneration) {
++            cliAccountCache = { tokenHash, account };
++          }
++        } else {
++          account = yield* sha256(`antigravity-cli\0${token.refresh_token || accessToken}`);
++        }
++      }
++    } else if (yield* fs.exists(tokenPath)) {
++      cliAccountCache = undefined;
++      const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
++      projectId = token.project_id;
++      const fingerprint = yield* sha256(
++        `${token.client_id}\0${token.refresh_token}\0${token.project_id ?? ""}`,
++      );
++      if (cached?.fingerprint !== fingerprint || cached.expiresAt <= now + 60_000) {
++        cached = undefined;
++        const refreshed = yield* request(
++          HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
++            HttpClientRequest.bodyUrlParams({
++              client_id: token.client_id,
++              client_secret: token.client_secret,
++              refresh_token: token.refresh_token,
++              grant_type: "refresh_token",
++            }),
++          ),
++        ).pipe(Effect.flatMap(decodeTokenResponse));
++        accessToken = refreshed.access_token;
++        // Use Google account IDs to merge accounts across environments; refresh tokens differ per machine.
++        const fetched = yield* fetchGoogleAccount(accessToken);
++        const accountVerified = Option.isSome(fetched);
++        account = accountVerified ? fetched.value : fingerprint;
++        if (generation === startedGeneration) {
++          cached = {
++            fingerprint,
++            account,
++            accountVerified,
++            accessToken,
++            expiresAt: now + refreshed.expires_in * 1000,
++          };
++        }
++      } else {
++        accessToken = cached.accessToken;
++        if (cached.accountVerified) {
++          account = cached.account;
++        } else {
++          const fetched = yield* fetchGoogleAccount(accessToken);
++          if (Option.isSome(fetched)) {
++            account = fetched.value;
++            if (generation === startedGeneration && cached.fingerprint === fingerprint) {
++              cached = { ...cached, account, accountVerified: true };
++            }
++          } else {
++            account = cached.account;
++          }
++        }
++      }
++    } else {
++      cached = undefined;
++      cliAccountCache = undefined;
++      return makeUnavailableUsageLimits({
++        checkedAt,
++        reason: "unsupported",
++        message: "Sign in with Google to see Antigravity limits.",
++      });
++    }
++    const endpoints = ENDPOINTS[input.authMethod];
++    // Merge endpoints because quota groups differ; the metered host's reading of a bucket wins.
++    const fetchWindows = Effect.fn("AntigravityUsageProbe.fetchWindows")(function* <E>(
++      operation: string,
++      parse: (
++        response: unknown,
++        requestedAt: number,
++      ) => Effect.Effect<ServerProviderUsageWindow[], E>,
++    ) {
++      const responses = yield* Effect.forEach(
++        endpoints,
++        (endpoint) =>
++          Effect.gen(function* () {
++            // Capture each request after auth, so refresh latency does not widen the tolerance.
++            const requestedAt = yield* Clock.currentTimeMillis;
++            return yield* request(
++              HttpClientRequest.post(`${endpoint}/v1internal:${operation}`).pipe(
++                HttpClientRequest.setHeaders({
++                  Authorization: `Bearer ${accessToken}`,
++                  "User-Agent": antigravityUserAgent(platform, architecture),
++                }),
++                HttpClientRequest.bodyJsonUnsafe(projectId ? { project: projectId } : {}),
++              ),
++            ).pipe(
++              Effect.flatMap((response) => parse(response, requestedAt)),
++              Effect.orElseSucceed(() => []),
++            );
++          }),
++        { concurrency: "unbounded" },
++      );
++      const windows = new Map<string, ServerProviderUsageWindow>();
++      for (const window of responses.flat()) {
++        if (!windows.has(window.id)) windows.set(window.id, window);
++      }
++      return [...windows.values()];
++    });
++    const summary = yield* fetchWindows("retrieveUserQuotaSummary", antigravitySummaryWindows);
++    const windows = summary.length
++      ? summary
++      : yield* fetchWindows("fetchAvailableModels", (response) =>
++          decodeModels(response).pipe(Effect.map(modelWindows)),
++        );
++    if (windows.length === 0) {
++      return makeUnavailableUsageLimits({
++        checkedAt,
++        reason: "probeFailed",
++        message: "Antigravity did not return usable quota information.",
++      });
++    }
++    return { ...makeUsageLimits({ checkedAt, windows }), credentialFingerprint: account };
++  });
++  const probe = read.pipe(
++    Effect.provideService(Digest.Digest, crypto),
++    Effect.timeout("30 seconds"),
++    Effect.catch(() =>
++      Effect.gen(function* () {
++        return makeUnavailableUsageLimits({
++          checkedAt: DateTime.formatIso(yield* DateTime.now),
++          reason: "probeFailed",
++          message: "Could not read Antigravity limits. Refresh provider status to retry.",
++        });
++      }),
++    ),
++  );
++  return {
++    probe,
++    clear: Effect.sync(() => {
++      cached = undefined;
++      cliAccountCache = undefined;
++      generation++;
++    }),
++  };
++});
+diff --git a/packages/shared/src/usageLimits.test.ts b/packages/shared/src/usageLimits.test.ts
+index b2ce03d006..d4c82558d2 100644
+--- a/packages/shared/src/usageLimits.test.ts
++++ b/packages/shared/src/usageLimits.test.ts
+@@ -130,6 +130,17 @@ describe("new thread model fallback", () => {
+     ["cursor", ["autoPercentUsed"], "claude-opus-5-5", false, undefined, undefined],
+     ["cursor", ["autoPercentUsed"], "composer-2.5", false, undefined, undefined],
+     ["cursor", ["autoPercentUsed", "apiPercentUsed"], "composer-2.5", true, undefined, undefined],
++    ["antigravity", ["gemini-weekly"], "claude-opus-5-5", false, undefined, undefined],
++    ["antigravity", ["3p-weekly"], "claude-opus-5-5", true, undefined, undefined],
++    ["antigravity", ["3p-weekly"], "gemini-4-neon", false, undefined, undefined],
++    ["antigravity", ["gemini-weekly"], "antigravity-default", true, undefined, undefined],
++    ["antigravity", ["gemini-argon-weekly"], "gemini-4-carbon", false, undefined, undefined],
++    ["antigravity", ["gemini-argon-weekly"], "gemini-4-neon", false, undefined, undefined],
++    ["antigravity", ["gemini-argon-weekly"], "gemini-4-argon", true, undefined, undefined],
++    ["antigravity", ["gemini-carbon-quota"], "gemini-4-argon", false, undefined, undefined],
++    ["antigravity", ["gemini-carbon-quota"], "gemini-4-carbon", true, undefined, undefined],
++    ["antigravity", ["gemini-weekly"], "gemini-4-argon", false, undefined, undefined],
++    ["antigravity", ["gemini-5h"], "gemini-4-neon", true, undefined, undefined],
+     ["codex", ["individual"], "gpt-5.5", true, undefined, undefined],
+     ["opencode", ["go_weekly"], "opencode/big-pickle", false, undefined, undefined],
+     ["opencode", ["go_weekly"], "opencode-go/big-pickle", true, undefined, undefined],
+@@ -1241,6 +1252,29 @@ describe("pooled account columns", () => {
+     expect(cursorUsageWindowDetails(ids.at(-1)!, pool)?.label).toBe(label);
+   });
+ 
++  it("orders Antigravity windows with Gemini families first and session before weekly", () => {
++    const accounts = [
++      {
++        ...account("ag", [
++          { ...weekly, id: "3p-weekly", usedPercent: 50 },
++          { ...window, id: "3p-5h", usedPercent: 10 },
++          { ...weekly, id: "gemini-weekly", usedPercent: 20 },
++          { ...window, id: "gemini-5h", usedPercent: 5 },
++          { ...weekly, id: "gemini-argon-weekly", usedPercent: 80 },
++        ]),
++        driver: ProviderDriverKind.make("antigravity"),
++      },
++    ];
++    const pool = collectLimitPools(accounts, now)[0]!;
++    expect(displayLimitWindows(pool).map((w) => w.id)).toEqual([
++      "gemini-5h",
++      "gemini-weekly",
++      "gemini-argon-weekly",
++      "3p-5h",
++      "3p-weekly",
++    ]);
++  });
++
+   // regression: #20349 sessions stay visible while the weekly quota is exhausted
+   it.each([
+     ["claudeAgent", "13:00", 40, "14:00", 100],
+diff --git a/packages/shared/src/usageLimits.ts b/packages/shared/src/usageLimits.ts
+index 29a8b3ff38..b0012f9343 100644
+--- a/packages/shared/src/usageLimits.ts
++++ b/packages/shared/src/usageLimits.ts
+@@ -64,11 +64,52 @@ export function exhaustedUsageWindow(
+       return exhausted.find(
+         (window) => !window.id.startsWith("go_") || model.startsWith("opencode-go/"),
+       );
++    case "antigravity": {
++      const family = antigravityModelFamily(model);
++      return exhausted.find((window) => {
++        const pool = antigravityWindowPool(window.id);
++        return (
++          pool === undefined ||
++          family === undefined ||
++          pool === family ||
++          (pool === "3p" && (family === "claude" || family === "gpt"))
++        );
++      });
++    }
+     default:
+       return exhausted[0];
+   }
+ }
+ 
++function antigravityModelFamily(
++  model: string,
++): "argon" | "carbon" | "gemini" | "claude" | "gpt" | undefined {
++  const base = model.slice(model.lastIndexOf("/") + 1).toLowerCase();
++  if (base.startsWith("gemini-")) {
++    return base.includes("argon") ? "argon" : base.includes("carbon") ? "carbon" : "gemini";
++  }
++  if (base.startsWith("claude-")) return "claude";
++  if (base.startsWith("gpt-")) return "gpt";
++  return undefined;
++}
++
++function antigravityWindowPool(
++  id: string,
++): "argon" | "carbon" | "gemini" | "claude" | "gpt" | "3p" | undefined {
++  const normalized = id.toLowerCase();
++  if (normalized.startsWith("gemini-")) {
++    return normalized.includes("argon")
++      ? "argon"
++      : normalized.includes("carbon")
++        ? "carbon"
++        : "gemini";
++  }
++  if (normalized.startsWith("claude-")) return "claude";
++  if (normalized.startsWith("gpt-")) return "gpt";
++  if (normalized.startsWith("3p-")) return "3p";
++  return undefined;
++}
++
+ export function resolveNewThreadModelSelection(input: {
+   readonly defaultSelection: ModelSelection | null;
+   readonly explicitSelection?: ModelSelection | null;
+@@ -547,6 +588,16 @@ function hasDuplicateCursorTotal(pool: LimitPool): boolean {
+ }
+ 
+ export function displayLimitWindows(pool: LimitPool) {
++  if (pool.driver === "antigravity") {
++    return [...pool.windows].sort(
++      (left, right) =>
++        Number(!left.id.startsWith("gemini-")) - Number(!right.id.startsWith("gemini-")) ||
++        left.id
++          .replace(/-(5h|weekly|quota)$/, "")
++          .localeCompare(right.id.replace(/-(5h|weekly|quota)$/, "")) ||
++        WINDOW_KIND_ORDER[left.kind] - WINDOW_KIND_ORDER[right.kind],
++    );
++  }
+   if (pool.driver !== "cursor") return pool.windows;
+   const hasAuto = pool.windows.some((window) => window.id === "autoPercentUsed");
+   const hasApi = pool.windows.some((window) => window.id === "apiPercentUsed");
