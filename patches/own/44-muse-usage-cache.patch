@@ -1,5 +1,5 @@
 diff --git a/packages/provider-muse/src/server/driver.ts b/packages/provider-muse/src/server/driver.ts
-index 86c41f49a8..d53010c300 100644
+index 86c41f49a8..8cf9cfeffb 100644
 --- a/packages/provider-muse/src/server/driver.ts
 +++ b/packages/provider-muse/src/server/driver.ts
 @@ -34,6 +34,7 @@ import {
@@ -10,10 +10,11 @@ index 86c41f49a8..d53010c300 100644
  import { refreshMuseUsage } from "./usageProbe.ts";
  import type * as MuseUsageHome from "./MuseUsageHome.ts";
  import {
-@@ -128,6 +129,13 @@ export const MuseDriver: ProviderDriver<
+@@ -128,6 +129,14 @@ export const MuseDriver: ProviderDriver<
      // Serialize state changes and publication; CLI reads run outside this permit
      // so slow refreshes cannot block the adapter's notification stream.
      const usagePermit = yield* Semaphore.make(1);
++    const cacheFallbackPublished = yield* Ref.make(false);
 +    const usageCache = yield* makeMuseUsageCache({
 +      cacheDir: host.paths.providerStatusCacheDir,
 +      providerInstanceId: instanceId,
@@ -24,19 +25,26 @@ index 86c41f49a8..d53010c300 100644
      const withUsageLimits = Effect.fn("MuseDriver.withUsageLimits")(function* (
        provider: ServerProviderDraft,
      ) {
-@@ -136,7 +144,7 @@ export const MuseDriver: ProviderDriver<
+@@ -136,7 +145,13 @@ export const MuseDriver: ProviderDriver<
          environment: processEnvironment,
          cwd,
          provider,
 -        state: { account: usageAccount, latestUsage, permit: usagePermit },
-+        state: { account: usageAccount, latestUsage, permit: usagePermit, cache: usageCache },
++        state: {
++          account: usageAccount,
++          latestUsage,
++          permit: usagePermit,
++          cache: usageCache,
++          cacheFallbackPublished,
++        },
        });
        return refreshed.provider;
      });
-@@ -258,6 +266,7 @@ export const MuseDriver: ProviderDriver<
+@@ -258,6 +273,8 @@ export const MuseDriver: ProviderDriver<
            complete: true,
            ...(authLabel !== undefined ? { authLabel } : {}),
          });
++        yield* Ref.set(cacheFallbackPublished, false);
 +        yield* usageCache.write(auth, usage);
        }, usagePermit.withPermits(1)),
        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
@@ -358,10 +366,28 @@ index 0000000000..eba666766e
 +  return { read, write, reconcileAuth, clear } satisfies MuseUsageCache;
 +});
 diff --git a/packages/provider-muse/src/server/usageProbe.test.ts b/packages/provider-muse/src/server/usageProbe.test.ts
-index ec11432b3a..1451781338 100644
+index ec11432b3a..34525f1969 100644
 --- a/packages/provider-muse/src/server/usageProbe.test.ts
 +++ b/packages/provider-muse/src/server/usageProbe.test.ts
-@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
+@@ -1,15 +1,25 @@
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { expect, it } from "@effect/vitest";
+ import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
++import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
++import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
+ import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
++import {
++  DEFAULT_SERVER_SETTINGS,
++  ProviderDriverKind,
++  ProviderInstanceId,
++  type ServerProvider,
++} from "@t3tools/contracts";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Fiber from "effect/Fiber";
+ import * as Schema from "effect/Schema";
++import * as Stream from "effect/Stream";
  import * as TestClock from "effect/testing/TestClock";
  import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
  import { MuseSettings } from "../settings.ts";
@@ -369,7 +395,7 @@ index ec11432b3a..1451781338 100644
  import { refreshMuseUsage as refreshState, type MuseUsageReport } from "./usageProbe.ts";
  import type { MuseUsageAccount } from "./usageLimits.ts";
  import * as Ref from "effect/Ref";
-@@ -382,4 +383,221 @@ it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
+@@ -382,4 +392,330 @@ it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
        }),
      ),
    );
@@ -590,9 +616,118 @@ index ec11432b3a..1451781338 100644
 +        }),
 +      ),
 +  );
++
++  it.effect(
++    "clears published ManagedServerProvider snapshot bars when restored cache expires or switches to label-only login",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++          const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "muse-probe-managed-" });
++          const cache = yield* makeMuseUsageCache({ cacheDir, providerInstanceId: "muse" });
++          const emptyInput = yield* fixture(
++            'process.stdout.write(JSON.stringify({schemaVersion:1,allowance:null}));',
++          );
++          const stamp = (draft: ServerProviderDraft): ServerProvider => ({
++            ...draft,
++            instanceId: ProviderInstanceId.make("muse"),
++            driver: ProviderDriverKind.make("muse"),
++            displayName: "Muse Code",
++          });
++          const maintenance = {
++            provider: ProviderDriverKind.make("muse"),
++            packageName: "@muse-code/cli",
++            update: {
++              command: "npm install -g @muse-code/cli@latest",
++              executable: "npm",
++              args: ["install", "-g", "@muse-code/cli@latest"],
++              lockKey: "npm-global",
++            },
++          } as const;
++          const makeManaged = (
++            authRef: Ref.Ref<ServerProviderDraft["auth"]>,
++            state: {
++              readonly account: Ref.Ref<MuseUsageAccount>;
++              readonly latestUsage: Ref.Ref<MuseUsageReport | undefined>;
++              readonly permit: Semaphore.Semaphore;
++              readonly cache: typeof cache;
++              readonly cacheFallbackPublished: Ref.Ref<boolean>;
++            },
++          ) =>
++            makeManagedServerProvider<{ readonly enabled: boolean }>({
++              resolveMaintenance: () => Effect.succeed(maintenance),
++              getSettings: Effect.succeed({ enabled: true }),
++              streamSettings: Stream.empty,
++              haveSettingsChanged: (a, b) => a.enabled !== b.enabled,
++              initialSnapshot: () => Effect.succeed(stamp({ ...provider, usageLimits: undefined })),
++              checkProvider: Effect.gen(function* () {
++                const auth = yield* Ref.get(authRef);
++                const refreshed = yield* refreshState({
++                  ...emptyInput,
++                  provider: { ...provider, auth },
++                  state,
++                });
++                return stamp(refreshed.provider);
++              }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
++              refreshOnInterval: false,
++            });
++
++          // Scenario 1 (F3): publish cached bars, then advance past both resets -> published snapshot clears bars.
++          yield* TestClock.setTime(observedAtMs + 1_000);
++          yield* cache.write(provider.auth, report.usage);
++          const expiryAuth = yield* Ref.make<ServerProviderDraft["auth"]>(provider.auth);
++          const expiryManaged = yield* makeManaged(expiryAuth, {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++            cacheFallbackPublished: yield* Ref.make(false),
++          });
++          const publishedBeforeExpiry = yield* expiryManaged.refresh;
++          expect(publishedBeforeExpiry.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([
++            1, 33,
++          ]);
++          yield* TestClock.setTime(allowance.weekly.resetsAtMs + 60_000);
++          const publishedAfterExpiry = yield* expiryManaged.refresh;
++          expect(publishedAfterExpiry.usageLimits?.windows ?? []).toEqual([]);
++
++          // Scenario 2 (F5): publish account A cached bars, switch to label-only login (even without label) -> clears bars.
++          yield* TestClock.setTime(observedAtMs + 1_000);
++          yield* cache.write(provider.auth, report.usage);
++          const switchAuth = yield* Ref.make<ServerProviderDraft["auth"]>(provider.auth);
++          const switchManaged = yield* makeManaged(switchAuth, {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++            cacheFallbackPublished: yield* Ref.make(false),
++          });
++          const publishedAccountA = yield* switchManaged.refresh;
++          expect(publishedAccountA.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([1, 33]);
++
++          // Switch to label-only account B (no email, no label -> ManagedServerProvider identity is undefined).
++          yield* Ref.set(switchAuth, { status: "authenticated", type: "accountLogin" });
++          const publishedLabelOnly = yield* switchManaged.refresh;
++          expect(publishedLabelOnly.usageLimits?.windows ?? []).toEqual([]);
++
++          // Returning to account A must not restore stale bars.
++          yield* Ref.set(switchAuth, provider.auth);
++          const publishedBackToA = yield* switchManaged.refresh;
++          expect(publishedBackToA.usageLimits?.windows ?? []).toEqual([]);
++        }),
++      ).pipe(
++        Effect.provide(
++          TestProviderHost.layer({
++            runBackgroundWork: false,
++            settings: { ...DEFAULT_SERVER_SETTINGS, enableProviderUpdateChecks: false },
++          }),
++        ),
++      ),
++  );
  });
 diff --git a/packages/provider-muse/src/server/usageProbe.ts b/packages/provider-muse/src/server/usageProbe.ts
-index d2e8863f2e..8215b924b1 100644
+index d2e8863f2e..a201ce5184 100644
 --- a/packages/provider-muse/src/server/usageProbe.ts
 +++ b/packages/provider-muse/src/server/usageProbe.ts
 @@ -17,6 +17,7 @@ import {
@@ -603,15 +738,16 @@ index d2e8863f2e..8215b924b1 100644
  import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
  
  const decodeUsage = Schema.decodeUnknownEffect(
-@@ -91,6 +92,7 @@ export interface MuseUsageState {
+@@ -91,6 +92,8 @@ export interface MuseUsageState {
    readonly account: Ref.Ref<MuseUsageAccount>;
    readonly latestUsage: Ref.Ref<MuseUsageReport | undefined>;
    readonly permit: Semaphore.Semaphore;
 +  readonly cache?: MuseUsageCache;
++  readonly cacheFallbackPublished?: Ref.Ref<boolean>;
  }
  
  export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (input: {
-@@ -108,6 +110,13 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
+@@ -108,6 +111,13 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
        const dropped = latest !== undefined && latest.generation !== account.generation;
        yield* Ref.set(state.account, account);
        if (dropped) yield* Ref.set(state.latestUsage, undefined);
@@ -625,35 +761,52 @@ index d2e8863f2e..8215b924b1 100644
        return { account, dropped };
      }),
    );
-@@ -142,15 +151,24 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
+@@ -140,17 +150,40 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
+       }
+       const account = currentAccount;
        let latestUsage = previous;
++      const wasCacheFallback = state.cacheFallbackPublished
++        ? yield* Ref.get(state.cacheFallbackPublished)
++        : false;
        if (usage && (!latestUsage || usage.observedAtMs > latestUsage.usage.observedAtMs)) {
          latestUsage = { usage, generation: account.generation };
 +        if (state.cache) {
 +          yield* state.cache.write(provider.auth, usage);
 +        }
-       }
++      }
 +      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
 +      // Keep disk-restored usage separate from live observations so each fallback
 +      // re-validates account identity and reset times until live data arrives.
-+      const observation =
-+        latestUsage?.usage ??
-+        (state.cache && !dropped ? yield* state.cache.read(provider.auth, nowMs) : undefined);
++      const cachedObservation =
++        !latestUsage && state.cache && !dropped
++          ? yield* state.cache.read(provider.auth, nowMs)
++          : undefined;
++      const observation = latestUsage?.usage ?? cachedObservation;
++      if (state.cacheFallbackPublished) {
++        yield* Ref.set(
++          state.cacheFallbackPublished,
++          latestUsage === undefined && cachedObservation !== undefined,
++        );
+       }
++      // If a previous refresh published disk-cached bars and that fallback expired or lost its
++      // verified identity, publish undefined so ManagedServerProvider clears the stale bars.
++      const cleared = dropped || (wasCacheFallback && observation === undefined);
        let usageLimits = museStatusUsageLimits({
          auth: provider.auth,
          enabled: provider.enabled,
 -        observation: latestUsage?.usage,
-+        observation,
-         dropped,
+-        dropped,
 -        nowMs: DateTime.toEpochMillis(yield* DateTime.now),
++        observation,
++        dropped: cleared,
 +        nowMs,
        });
 -      if (message && !latestUsage && !dropped) {
-+      if (message && !observation && !dropped) {
++      if (message && !observation && !cleared) {
          usageLimits = makeUnavailableUsageLimits({
            checkedAt: provider.checkedAt,
            reason: "probeFailed",
-@@ -164,7 +182,7 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
+@@ -164,7 +197,7 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
          latestUsage,
          provider: {
            ...provider,

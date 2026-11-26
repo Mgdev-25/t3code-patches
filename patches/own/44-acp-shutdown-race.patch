@@ -1,197 +1,11 @@
 diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts b/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
-index e6652c5963..bbe99eb851 100644
+index e6652c5963..d6f10f0de5 100644
 --- a/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
 +++ b/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
-@@ -4691,6 +4691,281 @@ it.effect.each(["manual_shutdown", "server_shutdown"] as const)(
+@@ -4691,6 +4691,95 @@ it.effect.each(["manual_shutdown", "server_shutdown"] as const)(
      }),
  );
  
-+it.effect(
-+  "ProviderSessionManagerV2 drops late ACP exit cancellations during shutdown so pending user input stays answerable",
-+  () =>
-+    Effect.gen(function* () {
-+      const state = yield* Ref.make(emptyState);
-+      const handshakeStarted = yield* Deferred.make<void>();
-+      const resumeOpen = yield* Deferred.make<void>();
-+      const effect = Effect.gen(function* () {
-+        const eventSink = yield* EventSink.EventSinkV2;
-+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-+        const now = yield* DateTime.now;
-+        const projectId = yield* idAllocator.allocate.project({
-+          fixtureName: "provider-session-manager-shutdown-race",
-+        });
-+        const threadId = yield* idAllocator.allocate.thread({
-+          fixtureName: "provider-session-manager-shutdown-race",
-+          projectId,
-+        });
-+        const providerSessionId = yield* idAllocator.allocate.providerSession({
-+          providerInstanceId: modelSelection.instanceId,
-+          threadId,
-+        });
-+        const providerThread = makeProviderThread({
-+          idAllocator,
-+          threadId,
-+          providerSessionId,
-+          now,
-+        });
-+        const providerTurnId = idAllocator.derive.providerTurn({
-+          driver: CODEX_DRIVER,
-+          nativeTurnId: "native-turn-shutdown-race",
-+        });
-+
-+        yield* eventSink.write({
-+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-+        });
-+        const pendingRequest = yield* makePendingRuntimeRequestEvents({
-+          idAllocator,
-+          threadId,
-+          providerSessionId,
-+          providerThread,
-+          now,
-+        });
-+        const userInputEvents = pendingRequest.events.map((event) =>
-+          event.type === "turn-item.updated"
-+            ? {
-+                ...event,
-+                payload: {
-+                  ...event.payload,
-+                  type: "user_input_request" as const,
-+                  questions: [
-+                    { id: "action", header: "Action", question: "Continue?", options: [] },
-+                  ],
-+                },
-+              }
-+            : event.type === "runtime-request.updated"
-+              ? {
-+                  ...event,
-+                  payload: { ...event.payload, kind: "user_input" as const },
-+                }
-+              : event,
-+        );
-+        const initialRequestEvent = userInputEvents.find(
-+          (event) => event.type === "runtime-request.updated",
-+        )!;
-+        const initialTurnItemEvent = userInputEvents.find(
-+          (event) => event.type === "turn-item.updated",
-+        )!;
-+        const initialRequest = initialRequestEvent.payload;
-+        const initialTurnItem = initialTurnItemEvent.payload;
-+
-+        yield* eventSink.write({ events: userInputEvents });
-+
-+        // Hold open in handshake so shutdown begins before the session finishes starting,
-+        // leaving the event pump and subscriber live when shutdown-time exit events arrive.
-+        const opening = yield* manager
-+          .open({
-+            threadId,
-+            providerSessionId,
-+            modelSelection,
-+            runtimePolicy,
-+          })
-+          .pipe(Effect.forkChild({ startImmediately: true }));
-+        yield* Deferred.await(handshakeStarted);
-+        yield* manager.shutdown;
-+        yield* Deferred.succeed(resumeOpen, undefined);
-+        const runtime = yield* Fiber.join(opening);
-+
-+        const receivedSignals: Array<unknown> = [];
-+        const subscriber = yield* runtime.events.pipe(
-+          Stream.runForEach((event) =>
-+            Effect.sync(() => {
-+              receivedSignals.push(event);
-+            }),
-+          ),
-+          Effect.forkChild({ startImmediately: true }),
-+        );
-+        yield* Effect.yieldNow;
-+
-+        const adapterEvents = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
-+        assert.isDefined(adapterEvents);
-+
-+        // Emit valid ACP exit events (failed terminal, cancelled request, failed turn item)
-+        // plus stream end while the session and subscriber are live during shutdown.
-+        const lateExitEvents = [
-+          {
-+            type: "turn.terminal" as const,
-+            driver: CODEX_DRIVER,
-+            providerThreadId: providerThread.id,
-+            providerTurnId,
-+            runOrdinal: 1,
-+            failureItemOrdinal: 1,
-+            status: "failed" as const,
-+            failure: makeProviderFailure({
-+              cause: new Error("AcpProcessExitedError: ACP process exited with code 0"),
-+              class: "provider_error",
-+            }),
-+            threadDisposition: "reusable" as const,
-+          },
-+          {
-+            type: "runtime_request.updated" as const,
-+            driver: CODEX_DRIVER,
-+            threadId,
-+            runtimeRequest: {
-+              ...initialRequest,
-+              status: "cancelled" as const,
-+              responseCapability: {
-+                type: "not_resumable" as const,
-+                reason: "AcpProcessExitedError: ACP process exited with code 0",
-+              },
-+              resolvedAt: now,
-+            },
-+          },
-+          {
-+            type: "turn_item.updated" as const,
-+            driver: CODEX_DRIVER,
-+            turnItem: {
-+              ...initialTurnItem,
-+              status: "failed" as const,
-+              completedAt: now,
-+              updatedAt: now,
-+            },
-+          },
-+        ] satisfies ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
-+
-+        yield* Queue.offerAll(adapterEvents!, lateExitEvents);
-+        yield* Queue.end(adapterEvents!);
-+        for (let i = 0; i < 10; i++) {
-+          yield* Effect.yieldNow;
-+        }
-+        yield* Fiber.interrupt(subscriber);
-+
-+        const projection = yield* projectionStore.getThreadProjection(threadId);
-+        const request = projection.runtimeRequests.at(-1);
-+        const requestTurnItem = projection.turnItems.find(
-+          (item) => item.type === "user_input_request" && item.requestId === request?.id,
-+        );
-+        assert.deepEqual(receivedSignals, []);
-+        assert.equal(request?.status, "pending");
-+        assert.equal(request?.responseCapability.type, "live");
-+        assert.equal(requestTurnItem?.status, "waiting");
-+
-+        // Preserved question remains answerable after shutdown.
-+        yield* runtime.respondToRuntimeRequest({
-+          requestId: request!.id,
-+          answers: { action: "yes" },
-+        });
-+      });
-+
-+      yield* effect.pipe(
-+        Effect.provide(
-+          layerTest({
-+            state,
-+            idleTimeoutMs: 1000,
-+            beforeOpen: () =>
-+              Deferred.succeed(handshakeStarted, undefined).pipe(
-+                Effect.andThen(Deferred.await(resumeOpen)),
-+              ),
-+          }),
-+        ),
-+      );
-+    }),
-+);
-+
 +it.effect(
 +  "ProviderSessionManagerV2 still fails pending requests when the provider exits unexpectedly outside shutdown",
 +  () =>
@@ -349,6 +163,392 @@ index 291ac02272..bb45c37efa 100644
                  idleGeneration: 0,
                  busyTurns: new Set(),
                  idleFiber: null,
+diff --git a/apps/server/src/orchestration-v2/runtimeLayer.test.ts b/apps/server/src/orchestration-v2/runtimeLayer.test.ts
+index 370fd7deb9..b374d9d625 100644
+--- a/apps/server/src/orchestration-v2/runtimeLayer.test.ts
++++ b/apps/server/src/orchestration-v2/runtimeLayer.test.ts
+@@ -42,6 +42,7 @@ import {
+   ThreadId,
+ } from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
++import * as Cause from "effect/Cause";
+ import * as DateTime from "effect/DateTime";
+ import * as Deferred from "effect/Deferred";
+ import * as Fiber from "effect/Fiber";
+@@ -14816,3 +14817,373 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
+     );
+   },
+ );
++
++it.effect(
++  "preserves a pending ACP user_input form across live shutdown exit events so startup recovery accepts an answer as a new user message",
++  () =>
++    Effect.gen(function* () {
++      const acpInstanceId = modelSelection.instanceId;
++      const acpEvents = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>();
++      const siblingEvents = yield* Queue.unbounded<
++        ProviderAdapter.ProviderAdapterV2Event,
++        Cause.Done
++      >();
++      const handshakeStarted = yield* Deferred.make<void>();
++      const resumeOpen = yield* Deferred.make<void>();
++      const shutdownEntered = yield* Deferred.make<void>();
++      const releaseShutdown = yield* Deferred.make<void>();
++      const liveAcpCapabilities = {
++        ...CodexProviderCapabilitiesV2,
++        turns: { ...CodexProviderCapabilitiesV2.turns, supportsNativeGoals: true },
++      };
++      const liveAntigravityInstance = {
++        ...antigravityProviderInstance,
++        instanceId: acpInstanceId,
++        orchestrationAdapter: {
++          ...antigravityProviderInstance.orchestrationAdapter,
++          instanceId: acpInstanceId,
++          openSession: (input) =>
++            Effect.gen(function* () {
++              const isTarget =
++                input.providerSessionId === ProviderSessionId.make("session:acp-shutdown-race");
++              if (isTarget) {
++                yield* Deferred.succeed(handshakeStarted, undefined);
++                yield* Deferred.await(resumeOpen);
++              } else {
++                // Keep sessions.shutdown in flight until exit events have been delivered on the target session.
++                yield* Effect.addFinalizer(() =>
++                  Deferred.succeed(shutdownEntered, undefined).pipe(
++                    Effect.andThen(Deferred.await(releaseShutdown)),
++                  ),
++                );
++              }
++              const openedAt = yield* DateTime.now;
++              const events = isTarget ? acpEvents : siblingEvents;
++              return {
++                instanceId: acpInstanceId,
++                driver: antigravityDriver,
++                providerSessionId: input.providerSessionId,
++                providerSession: {
++                  id: input.providerSessionId,
++                  driver: antigravityDriver,
++                  providerInstanceId: acpInstanceId,
++                  status: "ready" as const,
++                  cwd: input.runtimePolicy.cwd ?? process.cwd(),
++                  model: input.modelSelection.model,
++                  capabilities: liveAcpCapabilities,
++                  createdAt: openedAt,
++                  updatedAt: openedAt,
++                  lastError: null,
++                },
++                events: Stream.fromQueue(events),
++                ensureThread: () => Effect.die("unused"),
++                resumeThread: () => Effect.die("unused"),
++                unloadThread: () => Effect.void,
++                startTurn: () => Effect.die("unused"),
++                steerTurn: () => Effect.die("unused"),
++                interruptTurn: () => Effect.void,
++                readThreadSnapshot: () => Effect.die("unused"),
++                forkThread: () => Effect.die("unused"),
++                respondToRuntimeRequest: () => Effect.void,
++                rollbackThread: () => Effect.die("unused"),
++              } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
++            }),
++        },
++      } satisfies ProviderInstance;
++      const layerLiveAcp = Layer.mergeAll(
++        RuntimeLayer.layer,
++        RuntimeLayer.layerEventSink,
++        ProjectStore.layer,
++        ProjectionStore.layer,
++        EffectOutbox.layer,
++      ).pipe(
++        Layer.provide(McpSessionRegistryTestkit.layer),
++        Layer.provide(McpProviderSessions.layer),
++        Layer.provide(SqlitePersistence.layerMemory),
++        Layer.provide(layerCheckpointStoreTest),
++        Layer.provide(layerServerConfig),
++        Layer.provide(ServerSettings.layerTest()),
++        Layer.provide(
++          Layer.merge(
++            ModelManifest.layerTest,
++            Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
++              getInstance: (instanceId) =>
++                Effect.succeed(
++                  [liveAntigravityInstance].find((instance) => instanceId === instance.instanceId),
++                ),
++              listInstances: Effect.succeed([liveAntigravityInstance]),
++              listUnavailable: Effect.succeed([]),
++              streamChanges: Stream.empty,
++              subscribeChanges: Effect.never,
++            }),
++          ),
++        ),
++        Layer.provide(layerGitWorkflowTest),
++        Layer.provide(layerProjectServiceTest),
++        Layer.provide(layerPlatformTest),
++      );
++
++      yield* Effect.gen(function* () {
++        const orchestrator = yield* Orchestrator.OrchestratorV2;
++        const eventSink = yield* EventSink.EventSinkV2;
++        const outbox = yield* EffectOutbox.EffectOutboxV2;
++        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
++        const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
++        const now = yield* DateTime.now;
++        const threadId = ThreadId.make("runtime-acp-shutdown-race");
++        const siblingThreadId = ThreadId.make("runtime-acp-shutdown-race-sibling");
++        const acpSelection: ModelSelection = {
++          instanceId: acpInstanceId,
++          model: "gemini-4-neon",
++          options: [],
++        };
++        const providerSessionId = ProviderSessionId.make("session:acp-shutdown-race");
++        const siblingSessionId = ProviderSessionId.make("session:acp-shutdown-race-sibling");
++        const providerThreadId = ProviderThreadId.make("provider-thread:acp-shutdown-race");
++        const providerTurnId = ProviderTurnId.make("provider-turn:acp-shutdown-race");
++        const requestId = RuntimeRequestId.make("request:acp-shutdown-race");
++        const nodeId = NodeId.make("node:acp-shutdown-race");
++        const itemId = TurnItemId.make("item:acp-shutdown-race");
++
++        yield* orchestrator.dispatch({
++          type: "thread.create",
++          commandId: CommandId.make("acp-shutdown-race-create"),
++          createdBy: "user",
++          creationSource: "web",
++          threadId,
++          projectId: ProjectId.make("acp-shutdown-race-project"),
++          title: "ACP shutdown race",
++          modelSelection: acpSelection,
++          runtimeMode: "full-access",
++          interactionMode: "default",
++          branch: null,
++          worktreePath: process.cwd(),
++        });
++        yield* orchestrator.dispatch({
++          type: "thread.create",
++          commandId: CommandId.make("acp-shutdown-race-create-sibling"),
++          createdBy: "user",
++          creationSource: "web",
++          threadId: siblingThreadId,
++          projectId: ProjectId.make("acp-shutdown-race-project"),
++          title: "ACP shutdown race sibling",
++          modelSelection: acpSelection,
++          runtimeMode: "full-access",
++          interactionMode: "default",
++          branch: null,
++          worktreePath: process.cwd(),
++        });
++
++        // Open the sibling session first so shutdown stays in flight while the target ACP session tears down.
++        yield* sessions.open({
++          threadId: siblingThreadId,
++          providerSessionId: siblingSessionId,
++          modelSelection: acpSelection,
++          runtimePolicy: {
++            runtimeMode: "full-access",
++            interactionMode: "default",
++            cwd: process.cwd(),
++          },
++        });
++        const opening = yield* sessions
++          .open({
++            threadId,
++            providerSessionId,
++            modelSelection: acpSelection,
++            runtimePolicy: {
++              runtimeMode: "full-access",
++              interactionMode: "default",
++              cwd: process.cwd(),
++            },
++          })
++          .pipe(Effect.forkChild({ startImmediately: true }));
++        yield* Deferred.await(handshakeStarted);
++
++        const pendingRequest: OrchestrationV2RuntimeRequest = {
++          id: requestId,
++          nodeId,
++          providerTurnId: null,
++          nativeRequestRef: {
++            driver: antigravityDriver,
++            nativeId: "acp-question-1",
++            strength: "strong",
++          },
++          kind: "user_input",
++          status: "pending",
++          responseCapability: { type: "live", providerSessionId },
++          createdAt: now,
++          resolvedAt: null,
++        };
++        const pendingTurnItem = {
++          id: itemId,
++          type: "user_input_request" as const,
++          threadId,
++          runId: null,
++          nodeId,
++          providerThreadId,
++          providerTurnId: null,
++          nativeItemRef: null,
++          parentItemId: null,
++          ordinal: 0,
++          status: "waiting" as const,
++          title: null,
++          startedAt: now,
++          completedAt: null,
++          updatedAt: now,
++          requestId,
++          questions: [{ id: "action", header: "Action", question: "Continue?", options: [] }],
++        };
++        yield* eventSink.write({
++          events: [
++            {
++              id: EventId.make("acp-shutdown-race-node"),
++              type: "node.updated",
++              threadId,
++              nodeId,
++              driver: antigravityDriver,
++              occurredAt: now,
++              payload: {
++                id: nodeId,
++                threadId,
++                runId: null,
++                parentNodeId: null,
++                rootNodeId: nodeId,
++                kind: "approval_request",
++                status: "waiting",
++                countsForRun: false,
++                providerThreadId,
++                providerTurnId: null,
++                nativeItemRef: null,
++                runtimeRequestId: requestId,
++                checkpointScopeId: null,
++                startedAt: now,
++                completedAt: null,
++              },
++            },
++            {
++              id: EventId.make("acp-shutdown-race-request"),
++              type: "runtime-request.updated",
++              threadId,
++              nodeId,
++              driver: antigravityDriver,
++              occurredAt: now,
++              payload: pendingRequest,
++            },
++            {
++              id: EventId.make("acp-shutdown-race-item"),
++              type: "turn-item.updated",
++              threadId,
++              nodeId,
++              driver: antigravityDriver,
++              occurredAt: now,
++              payload: pendingTurnItem,
++            },
++          ],
++        });
++
++        // Queue valid ACP teardown exit events on the live session right as server shutdown begins.
++        const lateExitEvents = [
++          {
++            type: "turn.terminal" as const,
++            driver: antigravityDriver,
++            providerThreadId,
++            providerTurnId,
++            runOrdinal: 1,
++            failureItemOrdinal: 1,
++            status: "failed" as const,
++            failure: {
++              class: "provider_error" as const,
++              message: "AcpProcessExitedError: ACP process exited with code 0",
++              code: null,
++              retryable: null,
++            },
++            threadDisposition: "reusable" as const,
++          },
++          {
++            type: "runtime_request.updated" as const,
++            driver: antigravityDriver,
++            threadId,
++            runtimeRequest: {
++              ...pendingRequest,
++              status: "cancelled" as const,
++              responseCapability: {
++                type: "not_resumable" as const,
++                reason: "AcpProcessExitedError: ACP process exited with code 0",
++              },
++              resolvedAt: now,
++            },
++          },
++          {
++            type: "turn_item.updated" as const,
++            driver: antigravityDriver,
++            turnItem: {
++              ...pendingTurnItem,
++              status: "failed" as const,
++              completedAt: now,
++              updatedAt: now,
++            },
++          },
++        ] satisfies ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
++
++        // Start shutdown while the sibling session holds shutdown in flight, then emit exit events
++        // on the live ACP session before shutdown returns.
++        const shuttingDown = yield* sessions.shutdown.pipe(
++          Effect.forkChild({ startImmediately: true }),
++        );
++        yield* Deferred.await(shutdownEntered);
++        yield* Deferred.succeed(resumeOpen, undefined);
++        const runtime = yield* Fiber.join(opening);
++        const receivedSignals: Array<unknown> = [];
++        const subscriber = yield* runtime.events.pipe(
++          Stream.runForEach((event) =>
++            Effect.sync(() => {
++              receivedSignals.push(event);
++            }),
++          ),
++          Effect.forkChild({ startImmediately: true }),
++        );
++        yield* Effect.yieldNow;
++
++        yield* Queue.offerAll(acpEvents, lateExitEvents);
++        yield* Queue.end(acpEvents);
++        for (let i = 0; i < 10; i++) {
++          yield* Effect.yieldNow;
++        }
++        yield* Deferred.succeed(releaseShutdown, undefined);
++        yield* Fiber.join(shuttingDown);
++        yield* Fiber.interrupt(subscriber);
++
++        assert.deepEqual(receivedSignals, []);
++
++        // Startup recovery on the persisted SQLite state promotes the preserved form to async message reply.
++        yield* recovery.reconcile("startup");
++        const recovered = yield* orchestrator.getThreadProjection(threadId);
++        const recoveredRequest = recovered.runtimeRequests.find((row) => row.id === requestId);
++        assert.equal(recoveredRequest?.status, "pending");
++        assert.equal(recoveredRequest?.responseCapability.type, "message");
++        assert.equal(recovered.turnItems.find((row) => row.id === itemId)?.status, "waiting");
++
++        // Answering the recovered form resolves the request and creates a new user message + start effect.
++        const answerCommandId = CommandId.make("acp-shutdown-race-answer");
++        yield* orchestrator.dispatch({
++          type: "runtime-request.respond",
++          commandId: answerCommandId,
++          threadId,
++          requestId,
++          answers: { action: "yes" },
++        });
++        const answered = yield* orchestrator.getThreadProjection(threadId);
++        assert.equal(
++          answered.runtimeRequests.find((row) => row.id === requestId)?.status,
++          "resolved",
++        );
++        assert.equal(answered.messages.length, 1);
++        assert.equal(answered.messages[0]?.role, "user");
++        assert.equal(answered.messages[0]?.text, "Continue?\nyes");
++        assert.deepEqual(
++          (yield* outbox.listByCommandId(answerCommandId)).map((effect) => effect.request.type),
++          ["provider-turn.start"],
++        );
++      }).pipe(Effect.provide(layerLiveAcp));
++    }),
++);
 diff --git a/apps/server/src/process/agentScope.test.ts b/apps/server/src/process/agentScope.test.ts
 index a637051ece..4bd65ee223 100644
 --- a/apps/server/src/process/agentScope.test.ts
