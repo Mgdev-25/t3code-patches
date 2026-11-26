@@ -132,6 +132,24 @@
       "summary": "Keeps a failed or backgrounded remote voice recording on mobile and adds Send again and Discard in the draft and form card.",
       "check": "On the preview app with Transcribe on set to a laptop environment: cut the laptop server during upload, then tap Send again after reconnect and confirm the text enters the draft one time with no new recording; also switch apps during a recording, come back, and confirm Recording saved with Send again and Discard; confirm Discard, draft reset, and changing destination delete the file. Tracked in t3code-patches issue 34.",
       "dropWhen": "Upstream mobile VoiceInputProvider enables retryFailedRecording, separates remote preflight from live transcription, keeps partial batch recordings on background, and shows Send again and Discard in the composer and question form."
+    },
+    {
+      "id": "44-acp-shutdown-race",
+      "bug": 44,
+      "file": "patches/own/44-acp-shutdown-race.patch",
+      "title": "Preserve pending forms on reboot",
+      "summary": "Orders agent scopes before the T3 boot service and drops late shutdown exit cancellations so pending forms survive reboot.",
+      "check": "Run vp test run apps/server/src/process/agentScope.test.ts apps/server/src/orchestration-v2/ProviderSessionManager.test.ts: agent scopes include --property=Before=t3code.service when T3_BOOT_SERVICE_UNIT is set, shutdown drops late exit cancellations so user_input stays pending, and unexpected non-shutdown exits still report error. Tracked in t3code-patches issue 44 and Shell issue 1716.",
+      "dropWhen": "Upstream agentScope orders transient agent scopes before T3_BOOT_SERVICE_UNIT on reboot and ProviderSessionManager drops late exit cancellations during programmatic server shutdown."
+    },
+    {
+      "id": "44-muse-usage-cache",
+      "bug": 44,
+      "file": "patches/own/44-muse-usage-cache.patch",
+      "title": "Cache Muse usage limits across restarts",
+      "summary": "Persists the latest verified Muse subscription usage limits to an atomic JSON file so Limits shows bars right after a reboot.",
+      "check": "Run vp test run packages/provider-muse/src/server/usageCache.test.ts packages/provider-muse/src/server/usageProbe.test.ts: verified email logins restore unexpired limits with original checkedAt after restart, account switch or logout or label-only login never restores stale limits, expired or corrupt entries are dropped, and newer live reads win. Morgan's feature exception of 2026-11-26 in Shell issue 1716 and t3code-patches issue 44.",
+      "dropWhen": "Upstream provider-muse persists verified subscription usage limits across server restarts without a database migration."
     }
   ]
 }
