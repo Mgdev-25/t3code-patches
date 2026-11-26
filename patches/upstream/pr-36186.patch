@@ -1,5 +1,5 @@
 diff --git a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
-index 6e18e2146d..a409813fd1 100644
+index 6e18e214..a409813f 100644
 --- a/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
 +++ b/apps/mobile/src/features/settings/SettingsVoiceRouteScreen.tsx
 @@ -1,9 +1,10 @@
@@ -115,10 +115,10 @@ index 6e18e2146d..a409813fd1 100644
            <Text className="px-2 text-sm text-foreground-muted">{m(UNAVAILABLE_EXPLANATION)}</Text>
          ) : null}
 diff --git a/apps/mobile/src/features/settings/VoiceModelSection.tsx b/apps/mobile/src/features/settings/VoiceModelSection.tsx
-index 7a745bb970..13634cfab5 100644
+index ea5dd905..89585fc0 100644
 --- a/apps/mobile/src/features/settings/VoiceModelSection.tsx
 +++ b/apps/mobile/src/features/settings/VoiceModelSection.tsx
-@@ -121,7 +121,7 @@ export function useVoiceModels(environmentId: EnvironmentId, label: string) {
+@@ -122,7 +122,7 @@ export function useVoiceModels(environmentId: EnvironmentId, label: string) {
  export type VoiceModels = ReturnType<typeof useVoiceModels>;
  
  const languageNames = new Map<string, Intl.DisplayNames>();
@@ -128,7 +128,7 @@ index 7a745bb970..13634cfab5 100644
    let names = languageNames.get(locale);
    if (!names)
 diff --git a/apps/mobile/src/features/voice-input/voiceDestination.test.ts b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
-index 39ac3160f9..980bb22011 100644
+index d5baf1d1..28a07b36 100644
 --- a/apps/mobile/src/features/voice-input/voiceDestination.test.ts
 +++ b/apps/mobile/src/features/voice-input/voiceDestination.test.ts
 @@ -1,5 +1,6 @@
@@ -177,7 +177,7 @@ index 39ac3160f9..980bb22011 100644
      expect(mocks.fetch.mock.calls.map(([url, init]) => [String(url), init?.redirect])).toEqual([
        ["https://my-server.test/api/voice/status", "error"],
        ["https://my-server.test/api/voice/transcribe", "error"],
-@@ -187,6 +207,10 @@ it("keeps local as the default and never reuses consent for an offline or resele
+@@ -188,6 +208,10 @@ it("keeps local as the default and never reuses consent for an offline or resele
        .mockResolvedValueOnce(Response.json({ text: "cloud" }));
      const next = await appAtomRegistry.get(voiceRouteAtom)!.transcriber!.prepare(options);
      await expect(next.transcribe("file:///voice.m4a", options)).resolves.toBe("cloud");
@@ -188,7 +188,7 @@ index 39ac3160f9..980bb22011 100644
      mocks.fetch.mockResolvedValueOnce(
        Response.json(
          {
-@@ -258,3 +282,20 @@ it("a late cloud key save cannot override a newer destination choice", () => {
+@@ -259,3 +283,20 @@ it("a late cloud key save cannot override a newer destination choice", () => {
      appAtomRegistry.reset();
    }
  });
@@ -210,7 +210,7 @@ index 39ac3160f9..980bb22011 100644
 +  }
 +});
 diff --git a/apps/mobile/src/features/voice-input/voiceDestination.ts b/apps/mobile/src/features/voice-input/voiceDestination.ts
-index 1a1c1e9396..787420306a 100644
+index 1a1c1e93..78742030 100644
 --- a/apps/mobile/src/features/voice-input/voiceDestination.ts
 +++ b/apps/mobile/src/features/voice-input/voiceDestination.ts
 @@ -29,6 +29,7 @@ import { requireOptionalNativeModule } from "expo";
@@ -296,7 +296,7 @@ index 1a1c1e9396..787420306a 100644
        ),
    };
 diff --git a/apps/mobile/src/lib/storage.test.ts b/apps/mobile/src/lib/storage.test.ts
-index 726eea9edf..d737cfa157 100644
+index 726eea9e..d737cfa1 100644
 --- a/apps/mobile/src/lib/storage.test.ts
 +++ b/apps/mobile/src/lib/storage.test.ts
 @@ -134,6 +134,14 @@ describe("mobile connection storage", () => {
@@ -315,7 +315,7 @@ index 726eea9edf..d737cfa157 100644
      mocks.setDatabaseFailures(true, true);
      await mocks.setItemAsync("t3code.preferences", JSON.stringify({ baseFontSize: 17 }));
 diff --git a/apps/mobile/src/persistence/mobile-preferences.ts b/apps/mobile/src/persistence/mobile-preferences.ts
-index 71d095b0b4..d1acdc60a9 100644
+index 98ee4cf3..42db020f 100644
 --- a/apps/mobile/src/persistence/mobile-preferences.ts
 +++ b/apps/mobile/src/persistence/mobile-preferences.ts
 @@ -17,6 +17,7 @@ import {
@@ -334,7 +334,7 @@ index 71d095b0b4..d1acdc60a9 100644
  
  export const PullRequestListControls = Schema.Struct({
    state: PullRequestListState,
-@@ -164,6 +166,7 @@ export interface Preferences {
+@@ -168,6 +170,7 @@ export interface Preferences {
    readonly followUpBehavior?: FollowUpBehavior;
    /** The client `language` setting: a locale code or "system". Unset means English. */
    readonly language?: string;
@@ -342,7 +342,7 @@ index 71d095b0b4..d1acdc60a9 100644
    readonly microphones?: ReadonlyArray<MicrophoneEntry>;
    readonly projectGroupingEnabled?: boolean;
    readonly projectGroupingMode?: SidebarProjectGroupingMode;
-@@ -254,6 +257,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
+@@ -262,6 +265,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
      composerEnterBehavior?: ComposerEnterBehavior;
      followUpBehavior?: FollowUpBehavior;
      language?: string;
@@ -350,7 +350,7 @@ index 71d095b0b4..d1acdc60a9 100644
      microphones?: ReadonlyArray<MicrophoneEntry>;
      projectGroupingEnabled?: boolean;
      projectGroupingMode?: SidebarProjectGroupingMode;
-@@ -369,6 +373,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
+@@ -391,6 +395,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
      preferences.followUpBehavior = parsed.followUpBehavior;
    }
    if (typeof parsed.language === "string") preferences.language = parsed.language;
@@ -361,16 +361,15 @@ index 71d095b0b4..d1acdc60a9 100644
      preferences.microphones = parsed.microphones.flatMap((entry): MicrophoneEntry[] => {
        if (typeof entry !== "object" || entry === null || !isMicrophoneKind(entry.kind)) return [];
 diff --git a/docs/user/voice-input.md b/docs/user/voice-input.md
-index 31b73218bc..090c731394 100644
+index 37923645..c470f66d 100644
 --- a/docs/user/voice-input.md
 +++ b/docs/user/voice-input.md
-@@ -10,6 +10,9 @@ On iPhone and Android, voice input transcribes on the device by default. To opt
- to a named environment on that phone, open **Settings → Voice → Transcribe on**. See
- [Voice input on mobile](./composer.md#voice-input-on-mobile).
+@@ -8,7 +8,7 @@ Dictate into the composer, citation comments, diff/file annotations, PR comments
+   - **On this Mac (Apple Speech)** (macOS 26+ desktop): Transcribes locally on your Mac (silence filtering and filler removal unavailable; dictionary applies only with cleanup enabled).
+   - **A connected environment**: Sends audio over your authenticated connection to transcribe locally on that host and discards the audio. Never silently fails over to another host.
+   - **Cloud providers (OpenAI, Grok Voice Transcribe, OpenRouter)**: Configure an API key (or [secret reference](./secrets.md)) on an environment to forward recordings to that provider. OpenRouter lets each user pick a model from its live STT catalog and requests zero data retention.
+-- **Mobile (iOS and Android)**: Transcribes on-device by default (iOS 26+ or Android 12+ with compatible Google speech services; first use may download a speech model, then works offline). To transcribe on a paired environment or cloud provider instead, configure **Settings → Voice → Transcribe on**. Keep T3 Code open while dictating on Android.
++- **Mobile (iOS and Android)**: Transcribes on-device by default (iOS 26+ or Android 12+ with compatible Google speech services; first use may download a speech model, then works offline). To transcribe on a paired environment or cloud provider instead, configure **Settings → Voice → Transcribe on** (and choose **Transcription language**; defaults to auto-detect, does not affect on-device dictation). Keep T3 Code open while dictating on Android.
  
-+For environment or cloud transcription on mobile, choose **Transcription language**
-+in Voice settings. The default is auto-detect. This choice does not affect on-device dictation.
-+
- ## Choose where audio goes
+ ## Set up a local transcription model
  
- On web and desktop, you choose where transcription runs.

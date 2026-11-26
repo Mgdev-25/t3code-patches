@@ -1,75 +1,42 @@
 diff --git a/docs/user/providers-muse.md b/docs/user/providers-muse.md
-index df506e678bcc..1d51ff8d264f 100644
+index fd2734eb..3024df8f 100644
 --- a/docs/user/providers-muse.md
 +++ b/docs/user/providers-muse.md
-@@ -9,8 +9,8 @@ and enable **Muse Code**. Set **Binary path** if Muse is not on the host's `PATH
- Refresh provider status after installation or login, then select Muse in a
- thread's model picker.
+@@ -7,7 +7,7 @@ Run [Muse Code](https://dev.meta.ai/docs/muse-code) on your T3 Code server. Muse
+ 1. Install Muse Code on the server machine and run `muse login` as the user running T3 Code.
+ 2. Open **Settings → Providers**, select the environment, enable **Muse Code** (set **Binary path** if not on `PATH`), and refresh provider status.
  
--Provider status does not check your login. If you are signed out, messages
--fail until you run `muse login` on the host.
-+Provider status shows when Muse is signed out. Run `muse login` on the host,
-+then refresh its status.
+-> Note: Provider status does not verify login—if you are signed out, turns fail until you run `muse login` on the host.
++> Note: Provider status shows when Muse is signed out. Run `muse login` on the host, then refresh its status.
  
- ## Sign-in and API keys
+ - **API key**: T3 Code ignores inherited server `META_API_KEY`. To bill an instance via API key instead of `muse login`, add `META_API_KEY` in that instance's **Environment** settings (overrides the saved login).
+ - **Multiple instances**: Instances on the same host share `muse login` unless given their own `META_API_KEY`.
+@@ -16,6 +16,7 @@ Run [Muse Code](https://dev.meta.ai/docs/muse-code) on your T3 Code server. Muse
+ ## Models, permissions, and limitations
  
-@@ -43,6 +43,21 @@ Muse can list models that your account cannot use. If a message fails with
- "does not exist or you lack access", pick another model, or add one your account
- can use under **Custom models** in the instance settings.
- 
-+## Usage limits
-+
-+**Usage → Limits** shows your Meta subscription's session and weekly windows.
-+T3 Code checks them when provider status refreshes, without sending a model
-+message, on Muse versions supporting `muse usage --json` (1.4.13 or newer).
-+Replies also update the windows. A failed refresh shows a provider warning and
-+keeps the last reported limits. If Meta has not reported an allowance yet or
-+your Muse version predates this command, limits appear after Muse's next reply. The same
-+Meta account signed in on several hosts counts once when Muse reports the same
-+email address on each host. If Muse reports only a display label, each connection
-+counts separately because the label does not uniquely identify an account.
-+
-+With an API key, Limits shows none: a key names no Meta account to count
-+them against.
-+
- ## Permissions and limitations
- 
- Muse offers two [permission modes](./permission-modes.md): **Supervised** asks
+ - **Models**: Reported by Muse on the host (refresh provider status after config changes). If a listed model fails with an access error, pick another or add an allowed ID under **Custom models**.
++- **Usage limits**: **Usage → Limits** checks your Meta subscription's session and weekly windows when provider status refreshes on Muse 1.4.13+ (`muse usage --json`) and updates them on replies. Failed refreshes keep the last reported limits. Connections reporting the same email count once; label-only connections count separately; API keys report no subscription limits.
+ - **Permission modes**: Supports **Supervised** and **Full access** only (**Auto** and **Auto-accept edits** are unavailable).
+ - **Skills**: Muse loads its own skills (`muse skills` on the host); they do not appear in the composer's `$` menu.
+ - **Forks & rewind**: Forking starts a new session with copied conversation context; conversation rewind is not supported.
 diff --git a/docs/user/usage.md b/docs/user/usage.md
-index e6b3a46d5a14..ddf8bed3f76f 100644
+index 9da54a1e..f2408212 100644
 --- a/docs/user/usage.md
 +++ b/docs/user/usage.md
-@@ -125,7 +125,8 @@ Claude resets are not available when the server runs on macOS, where Claude keep
- Keychain. On narrow screens, numbered rows below
- the bar show each account's quota, countdown, and credits. Tap a row to open its details.
+@@ -37,7 +37,7 @@ Usage aggregates history across Codex, Claude Code, Grok Build, OpenCode, Antigr
+   - **OpenCode**: OpenCode 2 servers with usage reporting show Go allowances and Console budgets for the connected workspace. Local servers can also report Go usage from a Go API key (`OPENCODE_API_KEY`).
+   - **Cursor**: Reports monthly Auto + API quotas via `CURSOR_AUTH_TOKEN` or default-endpoint sign-in/`CURSOR_API_KEY`.
+   - **Grok**: Reports billing-period quotas for `grok login` (not `XAI_API_KEY`).
+-  - **Muse Code**: Reports session/weekly limits after running in a thread (not persisted across restarts).
++  - **Muse Code**: Reports session and weekly limits when provider status refreshes (Muse 1.4.13+) and on replies. Connections reporting the same email count once across environments; label-only connections count separately; API keys report no subscription limits.
+   - Pure API-key accounts generally do not report subscription limits.
+ - **Mobile widget**: Add the **Subscription usage** widget on iOS or Android to monitor Codex and Claude quotas from your home screen.
  
--The same account signed in on more than one environment, or reported by a hub as well, counts once.
-+Connections identified by the same email address or credential fingerprint count once across
-+environments and hubs. Connections without either identifier count separately.
- Filter with the environment dropdown to see what a single machine has.
- 
- When a Claude or Codex account has no overall weekly quota left, its pooled session contribution
-@@ -165,8 +166,13 @@ Grok reports the remaining subscription allowance and reset time for its current
- after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
- or endpoint configurations do not report subscription limits.
- 
--Muse Code reports its session and weekly windows and its tier once the Muse CLI has run in a thread.
--Until then it shows no limits. Readings are not kept across a server restart.
-+Muse Code reports your Meta subscription's session and weekly windows when provider status
-+refreshes (Muse 1.4.13 or newer) and with each reply. If the usage command is unavailable or
-+returns no allowance, T3 Code keeps the last report for the same account, or waits for the next
-+reply when none is available. Muse connections reporting the same email address count once
-+across environments. Connections reporting only a display label count separately because
-+labels do not uniquely identify accounts. With an API key, Muse does not report subscription
-+limits.
- 
- API-key accounts may not report subscription limits. This also applies to Claude connections
- using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 diff --git a/packages/provider-core/src/server/managedProvider.test.ts b/packages/provider-core/src/server/managedProvider.test.ts
-index f878b2f44ecc..56367f00d838 100644
+index 0eccada2..6ea8b059 100644
 --- a/packages/provider-core/src/server/managedProvider.test.ts
 +++ b/packages/provider-core/src/server/managedProvider.test.ts
-@@ -891,7 +891,8 @@ describe("makeManagedServerProvider", () => {
+@@ -892,7 +892,8 @@ describe("makeManagedServerProvider", () => {
      { name: "no reading", hasUsage: false, clearPlan: false },
      { name: "an empty reading after clearing the plan", hasUsage: true, clearPlan: true },
      { name: "no reading after clearing the plan", hasUsage: false, clearPlan: true },
@@ -79,7 +46,7 @@ index f878b2f44ecc..56367f00d838 100644
      Effect.scoped(
        Effect.gen(function* () {
          const started = yield* Deferred.make<void>();
-@@ -910,7 +911,11 @@ describe("makeManagedServerProvider", () => {
+@@ -911,7 +912,11 @@ describe("makeManagedServerProvider", () => {
              }
              return {
                ...refreshedSnapshot,
@@ -92,7 +59,7 @@ index f878b2f44ecc..56367f00d838 100644
                ...(hasUsage
                  ? { usageLimits: { checkedAt: refreshedSnapshot.checkedAt, windows: [] } }
                  : {}),
-@@ -935,8 +940,14 @@ describe("makeManagedServerProvider", () => {
+@@ -936,8 +941,14 @@ describe("makeManagedServerProvider", () => {
          }
          yield* Deferred.succeed(release, undefined);
          const refreshed = yield* Fiber.join(refresh);
@@ -109,7 +76,7 @@ index f878b2f44ecc..56367f00d838 100644
          assert.strictEqual(refreshed.usageLimits?.unavailable, undefined);
        }),
      ).pipe(Effect.provide(layerAlwaysRunTest)),
-@@ -971,6 +982,70 @@ describe("makeManagedServerProvider", () => {
+@@ -972,6 +983,70 @@ describe("makeManagedServerProvider", () => {
      ).pipe(Effect.provide(layerAlwaysRunTest)),
    );
  
@@ -181,10 +148,10 @@ index f878b2f44ecc..56367f00d838 100644
      Effect.scoped(
        Effect.gen(function* () {
 diff --git a/packages/provider-core/src/server/managedProvider.ts b/packages/provider-core/src/server/managedProvider.ts
-index 33a8273359d1..538c17b73150 100644
+index 2762930b..08efa7aa 100644
 --- a/packages/provider-core/src/server/managedProvider.ts
 +++ b/packages/provider-core/src/server/managedProvider.ts
-@@ -201,8 +201,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+@@ -212,8 +212,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
          const previous = state.snapshot.auth;
          const differs = (a: string | undefined, b: string | undefined) =>
            a !== undefined && b !== undefined && a !== b;
@@ -198,7 +165,7 @@ index 33a8273359d1..538c17b73150 100644
            (probedSnapshot.auth.workspaceId !== undefined &&
              probedSnapshot.auth.workspaceId !== previous.workspaceId);
          const usageLimits = switchedAccount
-@@ -217,7 +221,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+@@ -228,7 +232,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
          const workspaceId =
            usageLimits === probedSnapshot.usageLimits ? undefined : state.snapshot.auth.workspaceId;
          const usageAuthLabel =
@@ -209,7 +176,7 @@ index 33a8273359d1..538c17b73150 100644
              ? state.usageAuthLabel
              : undefined;
          const labeledProbe =
-@@ -258,6 +264,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
+@@ -269,6 +275,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
                previous: state.snapshot.usageLimits,
                update,
                checkedAt: update.checkedAt,
@@ -218,7 +185,7 @@ index 33a8273359d1..538c17b73150 100644
          const { auth } = state.snapshot;
          const label = update.windows.length > 0 ? update.authLabel : undefined;
 diff --git a/packages/provider-core/src/server/snapshot.ts b/packages/provider-core/src/server/snapshot.ts
-index 2af61f3adcd0..84d15a7e6a19 100644
+index 2af61f3a..84d15a7e 100644
 --- a/packages/provider-core/src/server/snapshot.ts
 +++ b/packages/provider-core/src/server/snapshot.ts
 @@ -13,6 +13,7 @@ export type ProviderUsageLimitsReport = ProviderUsageLimitsUpdate & {
@@ -230,7 +197,7 @@ index 2af61f3adcd0..84d15a7e6a19 100644
  
  export interface ManagedServerProvider {
 diff --git a/packages/provider-core/src/server/usageLimits.test.ts b/packages/provider-core/src/server/usageLimits.test.ts
-index 2acdb0ba15d7..5004134f46bd 100644
+index 2acdb0ba..5004134f 100644
 --- a/packages/provider-core/src/server/usageLimits.test.ts
 +++ b/packages/provider-core/src/server/usageLimits.test.ts
 @@ -89,6 +89,89 @@ describe("applyUsageLimitsUpdate", () => {
@@ -324,7 +291,7 @@ index 2acdb0ba15d7..5004134f46bd 100644
      const resetCredits = { availableCount: 2, nextExpiresAt: "2026-10-01T00:00:00.000Z" };
      const next = applyUsageLimitsUpdate({
 diff --git a/packages/provider-core/src/server/usageLimits.ts b/packages/provider-core/src/server/usageLimits.ts
-index 7d1f6e6a910e..d5a7619e0dbb 100644
+index 7d1f6e6a..d5a7619e 100644
 --- a/packages/provider-core/src/server/usageLimits.ts
 +++ b/packages/provider-core/src/server/usageLimits.ts
 @@ -51,9 +51,30 @@ export function applyUsageLimitsUpdate(input: {
@@ -360,7 +327,7 @@ index 7d1f6e6a910e..d5a7619e0dbb 100644
    }
    const merged = new Map(previous?.windows.map((window) => [window.id, window] as const));
 diff --git a/packages/provider-muse/src/server/adapter.test.ts b/packages/provider-muse/src/server/adapter.test.ts
-index 76b46715c602..f2b1f850ff04 100644
+index b446bbf7..f2a2759e 100644
 --- a/packages/provider-muse/src/server/adapter.test.ts
 +++ b/packages/provider-muse/src/server/adapter.test.ts
 @@ -42,7 +42,6 @@ import type { MuseItem, MuseSubscriptionUsage } from "./protocol.ts";
@@ -417,7 +384,7 @@ index 76b46715c602..f2b1f850ff04 100644
  const approval = (turnId: string) => ({
    approvalId: "approval-1",
    turnId,
-@@ -608,7 +613,7 @@ describe("MuseAdapterV2", () => {
+@@ -621,7 +626,7 @@ describe("MuseAdapterV2", () => {
    it.effect("stops at a Meta usage limit until every exhausted window resets", () =>
      Effect.gen(function* () {
        const fake = yield* makeFakeMuse();
@@ -426,7 +393,7 @@ index 76b46715c602..f2b1f850ff04 100644
        const harness = yield* makeHarness(
          fake,
          INSTANCE_ID,
-@@ -616,7 +621,7 @@ describe("MuseAdapterV2", () => {
+@@ -629,7 +634,7 @@ describe("MuseAdapterV2", () => {
          undefined,
          undefined,
          runtimePolicy,
@@ -435,7 +402,7 @@ index 76b46715c602..f2b1f850ff04 100644
        );
        yield* fake.emitHostWide("usage/changed", {
          ...SUBSCRIPTION_USAGE,
-@@ -635,8 +640,8 @@ describe("MuseAdapterV2", () => {
+@@ -648,8 +653,8 @@ describe("MuseAdapterV2", () => {
        assert.strictEqual(terminal.failure?.class, "usage_limit");
        assert.strictEqual(terminal.failure?.resetAt, "2026-10-08T13:19:17.000Z");
        assert.deepStrictEqual(
@@ -446,7 +413,7 @@ index 76b46715c602..f2b1f850ff04 100644
        );
        assert.isTrue(
          harness.allEvents.some(
-@@ -699,7 +704,7 @@ describe("MuseAdapterV2", () => {
+@@ -712,7 +717,7 @@ describe("MuseAdapterV2", () => {
    it.effect("skips an unreadable usage report without ending the session", () =>
      Effect.gen(function* () {
        const fake = yield* makeFakeMuse();
@@ -455,7 +422,7 @@ index 76b46715c602..f2b1f850ff04 100644
        const harness = yield* makeHarness(
          fake,
          INSTANCE_ID,
-@@ -707,7 +712,7 @@ describe("MuseAdapterV2", () => {
+@@ -720,7 +725,7 @@ describe("MuseAdapterV2", () => {
          undefined,
          undefined,
          runtimePolicy,
@@ -464,7 +431,7 @@ index 76b46715c602..f2b1f850ff04 100644
        );
        yield* fake.emitHostWide("usage/changed", { window: "not usage" });
        yield* fake.emitHostWide("usage/changed", {
-@@ -728,6 +733,42 @@ describe("MuseAdapterV2", () => {
+@@ -741,6 +746,42 @@ describe("MuseAdapterV2", () => {
      }).pipe(Effect.scoped, Effect.provide(testLayer)),
    );
  
@@ -508,7 +475,7 @@ index 76b46715c602..f2b1f850ff04 100644
      Effect.gen(function* () {
        const fake = yield* makeFakeMuse();
 diff --git a/packages/provider-muse/src/server/adapter.ts b/packages/provider-muse/src/server/adapter.ts
-index dbf27ebea95a..4fa2c24f9d5d 100644
+index 1bfe44d4..69a5d28d 100644
 --- a/packages/provider-muse/src/server/adapter.ts
 +++ b/packages/provider-muse/src/server/adapter.ts
 @@ -63,11 +63,7 @@ import {
@@ -532,7 +499,7 @@ index dbf27ebea95a..4fa2c24f9d5d 100644
  import {
    providerMessageTextWithAttachmentPaths,
    isProviderNativeImageAttachment,
-@@ -207,13 +202,21 @@ export interface MuseAdapterV2Options {
+@@ -208,13 +203,21 @@ export interface MuseAdapterV2Options {
    readonly createHost?: typeof createMuseSdkHost;
    readonly requestTimeoutMs?: number;
    readonly nativeEventLogger?: ProviderEventLoggers.EventNdjsonLogger;
@@ -556,7 +523,7 @@ index dbf27ebea95a..4fa2c24f9d5d 100644
  }
  
  interface ActiveTurn {
-@@ -349,6 +352,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
+@@ -350,6 +353,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
        const eventPermit = yield* Semaphore.make(1);
        let host: MuseSdkHost;
        let hostEpoch = 0;
@@ -565,7 +532,7 @@ index dbf27ebea95a..4fa2c24f9d5d 100644
        let closed = false;
        let broken = false;
        // Only idle host failures can be retried on this runtime.
-@@ -1382,12 +1387,12 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
+@@ -1400,12 +1405,12 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
        });
        const handleNotification = Effect.fnUntraced(function* (method: string, data: unknown) {
          const params = yield* decode(recordSchema, data);
@@ -583,7 +550,7 @@ index dbf27ebea95a..4fa2c24f9d5d 100644
            return;
          }
          if (params.sessionId !== nativeSessionId) return;
-@@ -1774,6 +1779,9 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
+@@ -1792,6 +1797,9 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
        );
        const launchHost = Effect.fnUntraced(function* () {
          const epoch = ++hostEpoch;
@@ -594,7 +561,7 @@ index dbf27ebea95a..4fa2c24f9d5d 100644
          const environment = McpProviderSession.withAgentDeviceEnvironment(
            options.environment,
 diff --git a/packages/provider-muse/src/server/driver.ts b/packages/provider-muse/src/server/driver.ts
-index 197a219e54ec..0efabc4fbdc5 100644
+index 96e923a2..86c41f49 100644
 --- a/packages/provider-muse/src/server/driver.ts
 +++ b/packages/provider-muse/src/server/driver.ts
 @@ -1,12 +1,13 @@
@@ -686,7 +653,7 @@ index 197a219e54ec..0efabc4fbdc5 100644
      const resolveInstallation = yield* makeCachedProviderMaintenanceResolution(
        resolveProviderMaintenanceCapabilitiesEffect(museMaintenance, {
          binaryPath: effectiveConfig.binaryPath,
-@@ -171,8 +182,8 @@ export const MuseDriver: ProviderDriver<
+@@ -172,8 +183,8 @@ export const MuseDriver: ProviderDriver<
        initialSnapshot: (settings) =>
          makePendingMuseProvider(settings.provider).pipe(Effect.map(stampIdentity)),
        checkProvider: checkMuseProviderStatus(effectiveConfig, processEnvironment, cwd).pipe(
@@ -696,7 +663,7 @@ index 197a219e54ec..0efabc4fbdc5 100644
          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
          Effect.provideService(FileSystem.FileSystem, fileSystem),
          Effect.provideService(Path.Path, path),
-@@ -208,17 +219,47 @@ export const MuseDriver: ProviderDriver<
+@@ -209,17 +220,47 @@ export const MuseDriver: ProviderDriver<
        settings: effectiveConfig,
        environment: processEnvironment,
        modelCatalog,
@@ -754,7 +721,7 @@ index 197a219e54ec..0efabc4fbdc5 100644
      const textGeneration = yield* makeMuseTextGeneration(effectiveConfig, {
        environment: processEnvironment,
 diff --git a/packages/provider-muse/src/server/modelCatalog.test.ts b/packages/provider-muse/src/server/modelCatalog.test.ts
-index 277190c4d5b9..1eb78a1e5406 100644
+index 277190c4..1eb78a1e 100644
 --- a/packages/provider-muse/src/server/modelCatalog.test.ts
 +++ b/packages/provider-muse/src/server/modelCatalog.test.ts
 @@ -1,8 +1,144 @@
@@ -904,7 +871,7 @@ index 277190c4d5b9..1eb78a1e5406 100644
      const fallback = museModelCapabilities();
      expect(resolveMuseReasoningEffort(fallback, undefined)).toBe("high");
 diff --git a/packages/provider-muse/src/server/modelCatalog.ts b/packages/provider-muse/src/server/modelCatalog.ts
-index a99deca5354d..e1348096b88e 100644
+index a99deca5..e1348096 100644
 --- a/packages/provider-muse/src/server/modelCatalog.ts
 +++ b/packages/provider-muse/src/server/modelCatalog.ts
 @@ -4,7 +4,9 @@ import { ModelCapabilities, ServerProviderModel } from "@t3tools/contracts";
@@ -971,7 +938,7 @@ index a99deca5354d..e1348096b88e 100644
 +  return { models, account: Option.getOrUndefined(account) };
  });
 diff --git a/packages/provider-muse/src/server/protocol.ts b/packages/provider-muse/src/server/protocol.ts
-index 87c9c922ef59..f4232ce71bf2 100644
+index 87c9c922..f4232ce7 100644
 --- a/packages/provider-muse/src/server/protocol.ts
 +++ b/packages/provider-muse/src/server/protocol.ts
 @@ -167,7 +167,10 @@ const DateMillis = Schema.Finite.check(
@@ -1001,7 +968,7 @@ index 87c9c922ef59..f4232ce71bf2 100644
  export const MuseRetryScheduled = Schema.Struct({
    turnId: NonEmptyString,
 diff --git a/packages/provider-muse/src/server/sdk.ts b/packages/provider-muse/src/server/sdk.ts
-index 6d6b4d5d5105..2a79e7f83596 100644
+index aece589b..2f3e4056 100644
 --- a/packages/provider-muse/src/server/sdk.ts
 +++ b/packages/provider-muse/src/server/sdk.ts
 @@ -58,6 +58,8 @@ export interface MuseSdkHostOptions {
@@ -1013,7 +980,7 @@ index 6d6b4d5d5105..2a79e7f83596 100644
    readonly signal?: AbortSignal;
    readonly startupTimeoutMs?: number;
    readonly onProcessExit?: (exit: ProcessExit) => void;
-@@ -156,10 +158,14 @@ export function museServeArgs(
+@@ -157,10 +159,14 @@ export function museServeArgs(
    return args;
  }
  
@@ -1030,7 +997,7 @@ index 6d6b4d5d5105..2a79e7f83596 100644
    };
  }
  
-@@ -200,7 +206,7 @@ export async function createMuseSdkHost(
+@@ -201,7 +207,7 @@ export async function createMuseSdkHost(
    timer.unref();
    try {
      const host = await Promise.race([
@@ -1040,7 +1007,7 @@ index 6d6b4d5d5105..2a79e7f83596 100644
      ]);
      if (host.initializeResult.schema?.version !== 1) {
 diff --git a/packages/provider-muse/src/server/status.test.ts b/packages/provider-muse/src/server/status.test.ts
-index a5e51cf9369f..24583290d50d 100644
+index a5e51cf9..24583290 100644
 --- a/packages/provider-muse/src/server/status.test.ts
 +++ b/packages/provider-muse/src/server/status.test.ts
 @@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1232,7 +1199,7 @@ index a5e51cf9369f..24583290d50d 100644
      Effect.gen(function* () {
        const binaryPath = yield* fakeCli();
 diff --git a/packages/provider-muse/src/server/status.ts b/packages/provider-muse/src/server/status.ts
-index 344ae1d1a684..ed26762cce19 100644
+index 344ae1d1..ed26762c 100644
 --- a/packages/provider-muse/src/server/status.ts
 +++ b/packages/provider-muse/src/server/status.ts
 @@ -1,5 +1,5 @@
@@ -1342,7 +1309,7 @@ index 344ae1d1a684..ed26762cce19 100644
          ? { status: "ready" }
          : {
 diff --git a/packages/provider-muse/src/server/usageLimits.test.ts b/packages/provider-muse/src/server/usageLimits.test.ts
-index dddea9e6ac74..2e808d33c3cd 100644
+index dddea9e6..2e808d33 100644
 --- a/packages/provider-muse/src/server/usageLimits.test.ts
 +++ b/packages/provider-muse/src/server/usageLimits.test.ts
 @@ -3,8 +3,13 @@ import { describe, expect, it } from "@effect/vitest";
@@ -1522,7 +1489,7 @@ index dddea9e6ac74..2e808d33c3cd 100644
    });
  });
 diff --git a/packages/provider-muse/src/server/usageLimits.ts b/packages/provider-muse/src/server/usageLimits.ts
-index be981ebc009a..881c5773909d 100644
+index be981ebc..881c5773 100644
 --- a/packages/provider-muse/src/server/usageLimits.ts
 +++ b/packages/provider-muse/src/server/usageLimits.ts
 @@ -1,39 +1,27 @@
@@ -1731,7 +1698,7 @@ index be981ebc009a..881c5773909d 100644
  }
 diff --git a/packages/provider-muse/src/server/usageProbe.test.ts b/packages/provider-muse/src/server/usageProbe.test.ts
 new file mode 100644
-index 000000000000..ec11432b3ae0
+index 00000000..ec11432b
 --- /dev/null
 +++ b/packages/provider-muse/src/server/usageProbe.test.ts
 @@ -0,0 +1,385 @@
@@ -2122,7 +2089,7 @@ index 000000000000..ec11432b3ae0
 +});
 diff --git a/packages/provider-muse/src/server/usageProbe.ts b/packages/provider-muse/src/server/usageProbe.ts
 new file mode 100644
-index 000000000000..d2e8863f2e35
+index 00000000..d2e8863f
 --- /dev/null
 +++ b/packages/provider-muse/src/server/usageProbe.ts
 @@ -0,0 +1,179 @@

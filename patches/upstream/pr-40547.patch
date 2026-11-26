@@ -1,25 +1,5 @@
-diff --git a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-index 9534a50829..60a0be6bf0 100644
---- a/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-+++ b/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts
-@@ -44,6 +44,7 @@ import {
-   antigravityCommandOutlivesPrompt,
-   antigravitySubagentOutput,
-   classifyAntigravitySubagentToolCall,
-+  extractAntigravityElicitationForm,
-   extractAntigravityUserInputQuestion,
-   makeAntigravityReadRepair,
-   makeAntigravityUpdateStepsPlans,
-@@ -294,6 +295,7 @@ export function makeAntigravityAcpAdapterFlavor(
-         respond: (answers) => makeAntigravityUserInputResponse(request, answers),
-       };
-     },
-+    extractElicitationForm: extractAntigravityElicitationForm,
-     normalizeToolCall: normalizeAntigravityToolCall,
-     extractSubagentUpdate: extractAntigravitySubagentUpdate,
-     supportsImagePrompts: true,
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.test.ts b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
-index 902ad272aa..0c5e9092f3 100644
+index d7bf3aab..080b95e5 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.test.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.test.ts
 @@ -4,6 +4,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
@@ -30,7 +10,7 @@ index 902ad272aa..0c5e9092f3 100644
    extractAntigravityUserInputQuestion,
    antigravityApprovalOptions,
    antigravitySubagentOutput,
-@@ -271,6 +272,202 @@ describe("Antigravity permissions and questions", () => {
+@@ -334,6 +335,226 @@ describe("Antigravity permissions and questions", () => {
        makeAntigravityUserInputResponse(request, { interaction_9960062f: label + "..." }),
      ).toEqual({ outcome: { outcome: "selected", optionId: "stable-choice" } });
    });
@@ -174,8 +154,23 @@ index 902ad272aa..0c5e9092f3 100644
 +    });
 +  });
 +
++  it("omits a skipped optional choice without cancelling the rest of the form", () => {
++    const form = extractAntigravityElicitationForm(
++      elicitationRequest({
++        q1: singleChoiceField,
++        q1_other: otherField(singleChoiceField.title),
++        q2: multiChoiceField,
++        q2_other: otherField(multiChoiceField.title),
++      }),
++    );
++    expect(form?.respond({ q2: ["1"] })).toEqual({
++      action: "accept",
++      content: { q2: ["1"] },
++    });
++  });
++
 +  it.each([
-+    ["missing answer", { q2: ["1"] }],
++    ["blank answer", { q1: "   ", q2: ["1"] }],
 +    ["array answer for single-select", { q1: ["1"], q2: ["1"] }],
 +    ["unknown option in multi-select array", { q1: "1", q2: ["1", "unknown"] }],
 +  ])("cancels ask_question elicitation on %s", (_, answers) => {
@@ -198,13 +193,15 @@ index 902ad272aa..0c5e9092f3 100644
 +        q1_other: otherField(singleChoiceField.title),
 +        note: { type: "string", title: "Note" },
 +      }),
++      ["q1", "note"],
 +    ],
-+    ["orphan companion", elicitationRequest({ q1_other: otherField("orphan") })],
++    ["orphan companion", elicitationRequest({ q1_other: otherField("orphan") }), ["q1_other"]],
 +    [
 +      "required field",
 +      elicitationRequest({ q1: singleChoiceField, q1_other: otherField(singleChoiceField.title) }, [
 +        "q1",
 +      ]),
++      ["q1", "q1_other"],
 +    ],
 +    [
 +      "multi-select with item count constraints",
@@ -212,6 +209,7 @@ index 902ad272aa..0c5e9092f3 100644
 +        q1: { ...multiChoiceField, minItems: 1 },
 +        q1_other: otherField(multiChoiceField.title),
 +      }),
++      ["q1", "q1_other"],
 +    ],
 +    [
 +      "duplicate option values",
@@ -226,15 +224,21 @@ index 902ad272aa..0c5e9092f3 100644
 +        },
 +        q1_other: otherField("Pick one"),
 +      }),
++      ["q1"],
 +    ],
-+  ])("leaves %s to the generic ACP form parser", (_, request) => {
-+    expect(extractAntigravityElicitationForm(request)).toBeUndefined();
++  ])("leaves %s to the shared ACP form parser fallback", (_, request, expectedIds) => {
++    const form = extractAntigravityElicitationForm(request);
++    expect(form?.questions.map((question) => question.id)).toEqual(expectedIds);
++    // Shared parseElicitationForm marks optional non-multiSelect fields with required: false.
++    if (expectedIds.length === 1 && expectedIds[0] === "q1") {
++      expect(form?.questions[0]?.required).toBe(false);
++    }
 +  });
  });
  
  describe("Antigravity tool results", () => {
 diff --git a/apps/server/src/provider/acp/AntigravityProtocol.ts b/apps/server/src/provider/acp/AntigravityProtocol.ts
-index aedf7da7bc..ae1954caaa 100644
+index e1d4a137..cd75f139 100644
 --- a/apps/server/src/provider/acp/AntigravityProtocol.ts
 +++ b/apps/server/src/provider/acp/AntigravityProtocol.ts
 @@ -1,7 +1,9 @@
@@ -251,17 +255,9 @@ index aedf7da7bc..ae1954caaa 100644
  } from "@t3tools/contracts";
  import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
  import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
-@@ -11,6 +13,7 @@ import * as Schema from "effect/Schema";
- import type * as EffectAcpSchema from "effect-acp/compat";
- import * as AcpWireSchema from "effect-acp/schema-v1";
- 
-+import type { AcpAdapterV2Flavor } from "@t3tools/provider-acp/server/adapter";
- import {
-   extractMcpToolCallIdentity,
-   type AcpToolCallState,
-@@ -188,6 +191,191 @@ export function makeAntigravityUserInputResponse(
-   return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : undefined;
- }
+@@ -180,10 +182,198 @@ const isAskQuestionField = Schema.is(
+   Schema.Struct({ title: Schema.String, description: Schema.optional(Schema.String) }),
+ );
  
 +const ElicitationChoice = Schema.Struct({
 +  const: TrimmedNonEmptyString,
@@ -330,9 +326,9 @@ index aedf7da7bc..ae1954caaa 100644
 + * puts the question text in title. Fold each pair into one question and route custom answers or
 + * attachment notes to qN_other (agy appends qN_other to the resolved option labels).
 + */
-+export const extractAntigravityElicitationForm: NonNullable<
-+  AcpAdapterV2Flavor["extractElicitationForm"]
-+> = (request) => {
++const extractPairedAskQuestionForm: NonNullable<AcpAdapterV2Flavor["extractElicitationForm"]> = (
++  request,
++) => {
 +  if (request.mode !== "form" || !isElicitationForm(request.requestedSchema)) return undefined;
 +  const { properties, required } = request.requestedSchema;
 +  if (required !== undefined && required !== null && required.length > 0) return undefined;
@@ -369,7 +365,7 @@ index aedf7da7bc..ae1954caaa 100644
 +    });
 +  }
 +
-+  // Leave partial or differently shaped forms to the generic ACP fallback.
++  // Leave partial or differently shaped forms to the shared ACP fallback.
 +  if (matched.length === 0 || Object.keys(properties).length !== matched.length * 2) {
 +    return undefined;
 +  }
@@ -398,6 +394,7 @@ index aedf7da7bc..ae1954caaa 100644
 +      const entries: Array<[string, EffectAcpSchema.ElicitationContentValue]> = [];
 +      for (const entry of matched) {
 +        const answer = Object.hasOwn(answers, entry.id) ? answers[entry.id] : undefined;
++        if (answer === undefined) continue;
 +        const companionId = `${entry.id}_other`;
 +
 +        if (entry.multiSelect) {
@@ -448,6 +445,12 @@ index aedf7da7bc..ae1954caaa 100644
 +  };
 +};
 +
- function boundText(text: string, limit = TOOL_TEXT_LIMIT): string {
-   return text.length <= limit
-     ? text
+ /** agy's ask_question puts each question in its field's title and a count in the message. */
+ export const extractAntigravityElicitationForm: NonNullable<
+   AcpAdapterV2Flavor["extractElicitationForm"]
+ > = (request) => {
++  const paired = extractPairedAskQuestionForm(request);
++  if (paired !== undefined) return paired;
+   if (request.mode !== "form" || !isAskQuestionForm(request.requestedSchema)) return undefined;
+   const form = parseElicitationForm(request.requestedSchema, request.message);
+   if (form === undefined) return undefined;
