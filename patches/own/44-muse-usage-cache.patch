@@ -43,10 +43,10 @@ index 86c41f49a8..d53010c300 100644
        continuationRequests,
 diff --git a/packages/provider-muse/src/server/usageCache.test.ts b/packages/provider-muse/src/server/usageCache.test.ts
 new file mode 100644
-index 0000000000..b286a422f2
+index 0000000000..83e66302ea
 --- /dev/null
 +++ b/packages/provider-muse/src/server/usageCache.test.ts
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,161 @@
 +import * as NodeServices from "@effect/platform-node/NodeServices";
 +import { expect, it } from "@effect/vitest";
 +import type { ServerProviderAuth } from "@t3tools/contracts";
@@ -94,6 +94,10 @@ index 0000000000..b286a422f2
 +
 +        const writer = yield* makeMuseUsageCache({ cacheDir: dir, providerInstanceId: "muse" });
 +        yield* writer.write(accountA, usage);
++        const path = yield* Path.Path;
++        const filePath = museUsageCacheFilePath(path, dir, "muse");
++        const stat = yield* fs.stat(filePath);
++        expect(stat.mode & 0o777).toBe(0o600);
 +
 +        // Fresh cache instance simulating a server reboot.
 +        const reader = yield* makeMuseUsageCache({ cacheDir: dir, providerInstanceId: "muse" });
@@ -206,10 +210,10 @@ index 0000000000..b286a422f2
 +});
 diff --git a/packages/provider-muse/src/server/usageCache.ts b/packages/provider-muse/src/server/usageCache.ts
 new file mode 100644
-index 0000000000..bc00d97a5d
+index 0000000000..eba666766e
 --- /dev/null
 +++ b/packages/provider-muse/src/server/usageCache.ts
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,143 @@
 +// @effect-diagnostics nodeBuiltinImport:off -- atomic cache filenames use SHA-256 and UUIDs.
 +import * as NodeCrypto from "node:crypto";
 +
@@ -231,7 +235,9 @@ index 0000000000..bc00d97a5d
 +  usage: MuseSubscriptionUsage,
 +});
 +
-+const decodeCacheRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(MuseUsageCacheRecord));
++const CacheRecordJson = Schema.fromJsonString(MuseUsageCacheRecord);
++const decodeCacheRecord = Schema.decodeUnknownEffect(CacheRecordJson);
++const encodeCacheRecord = Schema.encodeEffect(CacheRecordJson);
 +
 +/**
 + * Only an authenticated account login with a verified email address may key
@@ -261,13 +267,14 @@ index 0000000000..bc00d97a5d
 +    auth: ServerProviderAuth,
 +    usage: MuseSubscriptionUsage,
 +  ) => Effect.Effect<void>;
++  readonly reconcileAuth: (auth: ServerProviderAuth) => Effect.Effect<void>;
 +  readonly clear: Effect.Effect<void>;
 +}
 +
 +export const makeMuseUsageCache = Effect.fn("MuseUsageCache.make")(function* (input: {
 +  readonly cacheDir: string;
 +  readonly providerInstanceId: string;
-+}): Effect.Effect<MuseUsageCache, never, FileSystem.FileSystem | Path.Path> {
++}) {
 +  const fileSystem = yield* FileSystem.FileSystem;
 +  const path = yield* Path.Path;
 +  const cachePath = museUsageCacheFilePath(path, input.cacheDir, input.providerInstanceId);
@@ -275,53 +282,83 @@ index 0000000000..bc00d97a5d
 +
 +  const clear = fileSystem.remove(cachePath, { force: true }).pipe(Effect.ignore);
 +
-+  const read: MuseUsageCache["read"] = (auth, nowMs) =>
-+    Effect.gen(function* () {
-+      const identity = verifiedMuseAccountIdentity(auth);
-+      if (identity === undefined) return undefined;
-+      const raw = yield* fileSystem.readFileString(cachePath).pipe(Effect.orElseSucceed(() => undefined));
-+      if (raw === undefined) return undefined;
-+      const decoded = yield* decodeCacheRecord(raw).pipe(Effect.orElseSucceed(() => undefined));
-+      if (decoded === undefined) return undefined;
-+      if (decoded.providerInstanceId !== input.providerInstanceId) return undefined;
-+      if (decoded.accountIdentity !== identity) {
-+        yield* clear;
-+        return undefined;
-+      }
-+      const { usage } = decoded;
-+      // Drop the cached entry once every reported window has already reset.
-+      const hasUnexpiredWindow =
-+        usage.window.resetsAtMs > nowMs || usage.weekly.resetsAtMs > nowMs;
-+      if (!hasUnexpiredWindow) {
-+        yield* clear;
-+        return undefined;
-+      }
-+      return usage;
-+    });
++  const reconcileAuth: MuseUsageCache["reconcileAuth"] = Effect.fn(
++    "MuseUsageCache.reconcileAuth",
++  )(function* (auth: ServerProviderAuth) {
++    if (auth.status === "unknown") return;
++    const identity = verifiedMuseAccountIdentity(auth);
++    // Clear any persisted file when Muse confirms signed-out, API key, or a label-only login.
++    if (identity === undefined) {
++      yield* clear;
++      return;
++    }
++    const raw = yield* fileSystem
++      .readFileString(cachePath)
++      .pipe(Effect.orElseSucceed(() => undefined));
++    if (raw === undefined) return;
++    const decoded = yield* decodeCacheRecord(raw).pipe(Effect.orElseSucceed(() => undefined));
++    if (decoded === undefined) return;
++    if (
++      decoded.providerInstanceId === input.providerInstanceId &&
++      decoded.accountIdentity !== identity
++    ) {
++      yield* clear;
++    }
++  });
 +
-+  const write: MuseUsageCache["write"] = (auth, usage) =>
-+    Effect.gen(function* () {
-+      const identity = verifiedMuseAccountIdentity(auth);
-+      if (identity === undefined) return;
-+      const payload = JSON.stringify({
-+        schemaVersion: CACHE_SCHEMA_VERSION,
-+        providerInstanceId: input.providerInstanceId,
-+        accountIdentity: identity,
-+        usage,
-+      });
-+      const tmpPath = `${cachePath}.${NodeCrypto.randomUUID()}.tmp`;
-+      yield* fileSystem.makeDirectory(cacheDir, { recursive: true }).pipe(
-+        Effect.andThen(fileSystem.writeFileString(tmpPath, payload)),
-+        Effect.andThen(fileSystem.rename(tmpPath, cachePath)),
-+        Effect.onError(() => fileSystem.remove(tmpPath, { force: true }).pipe(Effect.ignore)),
-+        Effect.ignore,
-+      );
-+    });
++  const read: MuseUsageCache["read"] = Effect.fn("MuseUsageCache.read")(function* (
++    auth: ServerProviderAuth,
++    nowMs: number,
++  ) {
++    const identity = verifiedMuseAccountIdentity(auth);
++    if (identity === undefined) return undefined;
++    const raw = yield* fileSystem
++      .readFileString(cachePath)
++      .pipe(Effect.orElseSucceed(() => undefined));
++    if (raw === undefined) return undefined;
++    const decoded = yield* decodeCacheRecord(raw).pipe(Effect.orElseSucceed(() => undefined));
++    if (decoded === undefined) return undefined;
++    if (decoded.providerInstanceId !== input.providerInstanceId) return undefined;
++    if (decoded.accountIdentity !== identity) {
++      yield* clear;
++      return undefined;
++    }
++    const { usage } = decoded;
++    // Drop the cached entry once every reported window has already reset.
++    const hasUnexpiredWindow = usage.window.resetsAtMs > nowMs || usage.weekly.resetsAtMs > nowMs;
++    if (!hasUnexpiredWindow) {
++      yield* clear;
++      return undefined;
++    }
++    return usage;
++  });
 +
-+  return { read, write, clear } satisfies MuseUsageCache;
++  const write: MuseUsageCache["write"] = Effect.fn("MuseUsageCache.write")(function* (
++    auth: ServerProviderAuth,
++    usage: MuseSubscriptionUsage,
++  ) {
++    const identity = verifiedMuseAccountIdentity(auth);
++    if (identity === undefined) return;
++    const payload = yield* encodeCacheRecord({
++      schemaVersion: CACHE_SCHEMA_VERSION,
++      providerInstanceId: input.providerInstanceId,
++      accountIdentity: identity,
++      usage,
++    }).pipe(Effect.orElseSucceed(() => undefined));
++    if (payload === undefined) return;
++    const tmpPath = `${cachePath}.${NodeCrypto.randomUUID()}.tmp`;
++    yield* fileSystem.makeDirectory(cacheDir, { recursive: true, mode: 0o700 }).pipe(
++      Effect.andThen(fileSystem.writeFileString(tmpPath, payload, { flag: "wx", mode: 0o600 })),
++      Effect.andThen(fileSystem.rename(tmpPath, cachePath)),
++      Effect.onError(() => fileSystem.remove(tmpPath, { force: true }).pipe(Effect.ignore)),
++      Effect.ignore,
++    );
++  });
++
++  return { read, write, reconcileAuth, clear } satisfies MuseUsageCache;
 +});
 diff --git a/packages/provider-muse/src/server/usageProbe.test.ts b/packages/provider-muse/src/server/usageProbe.test.ts
-index ec11432b3a..a0e2bafd3b 100644
+index ec11432b3a..1451781338 100644
 --- a/packages/provider-muse/src/server/usageProbe.test.ts
 +++ b/packages/provider-muse/src/server/usageProbe.test.ts
 @@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
@@ -332,7 +369,7 @@ index ec11432b3a..a0e2bafd3b 100644
  import { refreshMuseUsage as refreshState, type MuseUsageReport } from "./usageProbe.ts";
  import type { MuseUsageAccount } from "./usageLimits.ts";
  import * as Ref from "effect/Ref";
-@@ -382,4 +383,77 @@ it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
+@@ -382,4 +383,221 @@ it.layer(NodeServices.layer)("Muse CLI usage refresh", (it) => {
        }),
      ),
    );
@@ -364,20 +401,31 @@ index ec11432b3a..a0e2bafd3b 100644
 +            'process.stdout.write(JSON.stringify({schemaVersion:1,allowance:null,reason:"server_sent_no_usage"}));',
 +          );
 +          const restoredCache = yield* makeMuseUsageCache({ cacheDir, providerInstanceId: "muse" });
++          const rebootState = {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache: restoredCache,
++          };
 +          const afterReboot = yield* refreshState({
 +            ...rebootInput,
-+            state: {
-+              account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
-+              latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
-+              permit: yield* Semaphore.make(1),
-+              cache: restoredCache,
-+            },
++            state: rebootState,
 +          });
++          // Restored cache stays separate from live latestUsage.
++          expect(afterReboot.latestUsage).toBeUndefined();
 +          expect(afterReboot.provider.usageLimits?.unavailable).toBeUndefined();
 +          expect(afterReboot.provider.usageLimits?.checkedAt).toBe("2026-10-27T04:04:11.130Z");
 +          expect(afterReboot.provider.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([
 +            1, 33,
 +          ]);
++
++          // 2b. While only cached fallback exists, unknown auth must not expose cached limits.
++          const unknownAuthRefresh = yield* refreshState({
++            ...rebootInput,
++            provider: { ...provider, auth: { status: "unknown" } },
++            state: rebootState,
++          });
++          expect(unknownAuthRefresh.provider.usageLimits).toBeUndefined();
 +
 +          // 3. Newer live CLI reading overrides cached values and updates disk cache.
 +          const newerResponse = {
@@ -395,13 +443,9 @@ index ec11432b3a..a0e2bafd3b 100644
 +          );
 +          const updated = yield* refreshState({
 +            ...newerInput,
-+            state: {
-+              account: yield* Ref.make<MuseUsageAccount>(account),
-+              latestUsage: yield* Ref.make<MuseUsageReport | undefined>(afterReboot.latestUsage),
-+              permit: yield* Semaphore.make(1),
-+              cache: restoredCache,
-+            },
++            state: rebootState,
 +          });
++          expect(updated.latestUsage?.usage.window.usedPercent).toBe(19);
 +          expect(updated.provider.usageLimits?.windows[0]?.usedPercent).toBe(19);
 +          expect(
 +            (yield* restoredCache.read(provider.auth, observedAtMs + 120_000))?.window.usedPercent,
@@ -409,9 +453,146 @@ index ec11432b3a..a0e2bafd3b 100644
 +        }),
 +      ),
 +  );
++
++  it.effect(
++    "drops restored cache on a later refresh once every window has reset instead of keeping zeroed bars",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "muse-probe-expire-" });
++          const cache = yield* makeMuseUsageCache({ cacheDir, providerInstanceId: "muse" });
++          yield* cache.write(provider.auth, report.usage);
++
++          const emptyInput = yield* fixture(
++            'process.stdout.write(JSON.stringify({schemaVersion:1,allowance:null}));',
++          );
++          const state = {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++          };
++          const beforeExpiry = yield* refreshState({ ...emptyInput, state });
++          expect(beforeExpiry.provider.usageLimits?.windows.map((w) => w.usedPercent)).toEqual([
++            1, 33,
++          ]);
++
++          // Advance TestClock past both window and weekly resets.
++          yield* TestClock.setTime(allowance.weekly.resetsAtMs + 60_000);
++          const afterExpiry = yield* refreshState({ ...emptyInput, state });
++          expect(afterExpiry.provider.usageLimits?.windows).toEqual([]);
++          expect(afterExpiry.provider.usageLimits?.unavailable?.reason).toBe("probeFailed");
++          expect(yield* cache.read(provider.auth, observedAtMs + 1_000)).toBeUndefined();
++        }),
++      ),
++  );
++
++  it.effect(
++    "clears persisted account A cache on restart when Muse reports a label-only login for account B",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "muse-probe-switch-" });
++          const cache = yield* makeMuseUsageCache({ cacheDir, providerInstanceId: "muse" });
++          yield* cache.write(provider.auth, report.usage);
++
++          const emptyInput = yield* fixture(
++            'process.stdout.write(JSON.stringify({schemaVersion:1,allowance:null}));',
++          );
++          const state = {
++            account: yield* Ref.make<MuseUsageAccount>({ generation: 0, identity: undefined }),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++          };
++          const labelOnlyRefresh = yield* refreshState({
++            ...emptyInput,
++            provider: {
++              ...provider,
++              auth: { status: "authenticated", type: "accountLogin", label: "Account B" },
++            },
++            state,
++          });
++          expect(labelOnlyRefresh.provider.usageLimits?.windows).toEqual([]);
++          expect(labelOnlyRefresh.provider.usageLimits?.unavailable?.reason).toBe("probeFailed");
++
++          // Returning to account A must not resurrect the stale cache file.
++          const backToA = yield* refreshState({ ...emptyInput, state });
++          expect(backToA.provider.usageLimits?.windows).toEqual([]);
++          expect(backToA.provider.usageLimits?.unavailable?.reason).toBe("probeFailed");
++        }),
++      ),
++  );
++
++  it.effect(
++    "serializes disk cache writes under the usage permit so an older CLI read cannot overwrite a newer notification",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "muse-probe-race-" });
++          const cache = yield* makeMuseUsageCache({ cacheDir, providerInstanceId: "muse" });
++          const olderResponse = {
++            schemaVersion: 1,
++            allowance: {
++              ...allowance,
++              asOfMs: observedAtMs,
++              window: { ...allowance.window, usedPercent: 12 },
++            },
++            reason: null,
++            hint: null,
++          };
++          const input = yield* fixture(
++            `process.stdout.write(${JSON.stringify(JSON.stringify(olderResponse))});`,
++          );
++          const state = {
++            account: yield* Ref.make<MuseUsageAccount>(account),
++            latestUsage: yield* Ref.make<MuseUsageReport | undefined>(undefined),
++            permit: yield* Semaphore.make(1),
++            cache,
++          };
++          const started = yield* Deferred.make<void>();
++          const release = yield* Deferred.make<void>();
++          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++          const pending = yield* refreshState({ ...input, state }).pipe(
++            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
++              ...spawner,
++              spawn: (command) =>
++                Deferred.succeed(started, undefined).pipe(
++                  Effect.andThen(Deferred.await(release)),
++                  Effect.andThen(spawner.spawn(command)),
++                ),
++            }),
++            Effect.forkChild,
++          );
++          yield* Deferred.await(started);
++
++          // Newer inline notification arrives while CLI probe is in flight.
++          const newerUsage = {
++            ...report.usage,
++            observedAtMs: observedAtMs + 5_000,
++            window: { ...report.usage.window, usedPercent: 50 },
++          };
++          yield* state.permit.withPermits(1)(
++            Effect.gen(function* () {
++              yield* Ref.set(state.latestUsage, { usage: newerUsage, generation: account.generation });
++              yield* cache.write(provider.auth, newerUsage);
++            }),
++          );
++          yield* Deferred.succeed(release, undefined);
++          const refreshed = yield* Fiber.join(pending);
++          expect(refreshed.latestUsage?.usage.window.usedPercent).toBe(50);
++          expect(
++            (yield* cache.read(provider.auth, observedAtMs + 10_000))?.window.usedPercent,
++          ).toBe(50);
++        }),
++      ),
++  );
  });
 diff --git a/packages/provider-muse/src/server/usageProbe.ts b/packages/provider-muse/src/server/usageProbe.ts
-index d2e8863f2e..08c1095f11 100644
+index d2e8863f2e..8215b924b1 100644
 --- a/packages/provider-muse/src/server/usageProbe.ts
 +++ b/packages/provider-muse/src/server/usageProbe.ts
 @@ -17,6 +17,7 @@ import {
@@ -430,82 +611,54 @@ index d2e8863f2e..08c1095f11 100644
  }
  
  export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (input: {
-@@ -101,16 +103,22 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
-   readonly state: MuseUsageState;
- }) {
-   const { provider, state } = input;
--  const { account: initialAccount, dropped } = yield* state.permit.withPermits(1)(
-+  const { account: initialAccount, dropped, hadLatest } = yield* state.permit.withPermits(1)(
-     Effect.gen(function* () {
-       const account = nextMuseUsageAccount(yield* Ref.get(state.account), provider.auth);
-       const latest = yield* Ref.get(state.latestUsage);
+@@ -108,6 +110,13 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
        const dropped = latest !== undefined && latest.generation !== account.generation;
        yield* Ref.set(state.account, account);
        if (dropped) yield* Ref.set(state.latestUsage, undefined);
--      return { account, dropped };
-+      return { account, dropped, hadLatest: !dropped && latest !== undefined };
++      if (state.cache) {
++        if (dropped) {
++          yield* state.cache.clear;
++        } else {
++          yield* state.cache.reconcileAuth(provider.auth);
++        }
++      }
+       return { account, dropped };
      }),
    );
-+  if (
-+    state.cache &&
-+    (dropped || provider.auth.status === "unauthenticated" || provider.auth.type === "apiKey")
-+  ) {
-+    yield* state.cache.clear;
-+  }
-   const canRead =
-     provider.enabled &&
-     provider.installed &&
-@@ -126,7 +134,12 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
-     : undefined;
-   const usage = result && Result.isSuccess(result) ? result.success : undefined;
-   const message = result && Result.isFailure(result) ? result.failure : undefined;
--  return yield* state.permit.withPermits(1)(
-+  const nowBeforeCacheMs = DateTime.toEpochMillis(yield* DateTime.now);
-+  const cachedUsage =
-+    state.cache && !hadLatest && !usage && !dropped
-+      ? yield* state.cache.read(provider.auth, nowBeforeCacheMs)
-+      : undefined;
-+  const refreshed = yield* state.permit.withPermits(1)(
-     Effect.gen(function* () {
-       const currentAccount = yield* Ref.get(state.account);
-       const previous = yield* Ref.get(state.latestUsage);
-@@ -135,13 +148,18 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
-         return {
-           account: currentAccount,
-           latestUsage: previous,
-+          liveUsageToPersist: undefined as MuseSubscriptionUsage | undefined,
-           provider: { ...provider, usageLimits: undefined },
-         };
-       }
-       const account = currentAccount;
+@@ -142,15 +151,24 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
        let latestUsage = previous;
-+      let liveUsageToPersist: MuseSubscriptionUsage | undefined;
        if (usage && (!latestUsage || usage.observedAtMs > latestUsage.usage.observedAtMs)) {
          latestUsage = { usage, generation: account.generation };
-+        liveUsageToPersist = usage;
-+      } else if (!latestUsage && cachedUsage) {
-+        latestUsage = { usage: cachedUsage, generation: account.generation };
++        if (state.cache) {
++          yield* state.cache.write(provider.auth, usage);
++        }
        }
++      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
++      // Keep disk-restored usage separate from live observations so each fallback
++      // re-validates account identity and reset times until live data arrives.
++      const observation =
++        latestUsage?.usage ??
++        (state.cache && !dropped ? yield* state.cache.read(provider.auth, nowMs) : undefined);
        let usageLimits = museStatusUsageLimits({
          auth: provider.auth,
-@@ -162,6 +180,7 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
-       return {
-         account,
+         enabled: provider.enabled,
+-        observation: latestUsage?.usage,
++        observation,
+         dropped,
+-        nowMs: DateTime.toEpochMillis(yield* DateTime.now),
++        nowMs,
+       });
+-      if (message && !latestUsage && !dropped) {
++      if (message && !observation && !dropped) {
+         usageLimits = makeUnavailableUsageLimits({
+           checkedAt: provider.checkedAt,
+           reason: "probeFailed",
+@@ -164,7 +182,7 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
          latestUsage,
-+        liveUsageToPersist,
          provider: {
            ...provider,
-           auth: latestUsage ? museUsageAuth(provider.auth, latestUsage.usage.tier) : provider.auth,
-@@ -176,4 +195,12 @@ export const refreshMuseUsage = Effect.fn("MuseUsageProbe.refresh")(function* (i
-       };
-     }),
-   );
-+  if (state.cache && refreshed.liveUsageToPersist) {
-+    yield* state.cache.write(provider.auth, refreshed.liveUsageToPersist);
-+  }
-+  return {
-+    account: refreshed.account,
-+    latestUsage: refreshed.latestUsage,
-+    provider: refreshed.provider,
-+  };
- });
+-          auth: latestUsage ? museUsageAuth(provider.auth, latestUsage.usage.tier) : provider.auth,
++          auth: observation ? museUsageAuth(provider.auth, observation.tier) : provider.auth,
+           usageLimits,
+           ...(message
+             ? {

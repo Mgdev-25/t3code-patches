@@ -1,62 +1,18 @@
 diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts b/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
-index e6652c5963..6dbd309ee8 100644
+index e6652c5963..bbe99eb851 100644
 --- a/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
 +++ b/apps/server/src/orchestration-v2/ProviderSessionManager.test.ts
-@@ -494,6 +494,10 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
-     readonly archive?: Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
-     readonly spawnBeforeOpen?: boolean;
-     readonly scopeCloseReached?: Deferred.Deferred<void>;
-+    readonly onScopeClose?: (input: {
-+      readonly providerSessionId: ProviderSessionId;
-+      readonly events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>;
-+    }) => Effect.Effect<void>;
-     readonly eventStreamsEnded?: Queue.Queue<ProviderSessionId>;
-   } = {},
- ) {
-@@ -562,6 +566,12 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
-           yield* countClose;
-           if (options.hangSessionScopeClose === true) yield* hangClose;
-         }
-+        if (options.onScopeClose !== undefined) {
-+          const onScopeClose = options.onScopeClose;
-+          yield* Effect.addFinalizer(() =>
-+            onScopeClose({ providerSessionId: input.providerSessionId, events }),
-+          );
-+        }
- 
-         return {
-           instanceId: ProviderInstanceId.make("codex"),
-@@ -684,6 +694,10 @@ function layerTest(input: {
-   readonly archive?: Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
-   readonly spawnBeforeOpen?: boolean;
-   readonly scopeCloseReached?: Deferred.Deferred<void>;
-+  readonly onScopeClose?: (input: {
-+    readonly providerSessionId: ProviderSessionId;
-+    readonly events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>;
-+  }) => Effect.Effect<void>;
-   readonly eventStreamsEnded?: Queue.Queue<ProviderSessionId>;
-   readonly releaseRecorded?: Deferred.Deferred<void>;
-   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
-@@ -738,6 +752,7 @@ function layerTest(input: {
-       ...(input.scopeCloseReached === undefined
-         ? {}
-         : { scopeCloseReached: input.scopeCloseReached }),
-+      ...(input.onScopeClose === undefined ? {} : { onScopeClose: input.onScopeClose }),
-       ...(input.eventStreamsEnded === undefined
-         ? {}
-         : { eventStreamsEnded: input.eventStreamsEnded }),
-@@ -4691,6 +4706,248 @@ it.effect.each(["manual_shutdown", "server_shutdown"] as const)(
+@@ -4691,6 +4691,281 @@ it.effect.each(["manual_shutdown", "server_shutdown"] as const)(
      }),
  );
  
 +it.effect(
-+  "ProviderSessionManagerV2 drops late runtime exit cancellations during shutdown so startup recovery preserves pending user input",
++  "ProviderSessionManagerV2 drops late ACP exit cancellations during shutdown so pending user input stays answerable",
 +  () =>
 +    Effect.gen(function* () {
 +      const state = yield* Ref.make(emptyState);
-+      let cancelOnClose:
-+        | ((events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>) => Effect.Effect<void>)
-+        | undefined;
++      const handshakeStarted = yield* Deferred.make<void>();
++      const resumeOpen = yield* Deferred.make<void>();
 +      const effect = Effect.gen(function* () {
 +        const eventSink = yield* EventSink.EventSinkV2;
 +        const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -80,6 +36,10 @@ index e6652c5963..6dbd309ee8 100644
 +          providerSessionId,
 +          now,
 +        });
++        const providerTurnId = idAllocator.derive.providerTurn({
++          driver: CODEX_DRIVER,
++          nativeTurnId: "native-turn-shutdown-race",
++        });
 +
 +        yield* eventSink.write({
 +          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
@@ -91,81 +51,52 @@ index e6652c5963..6dbd309ee8 100644
 +          providerThread,
 +          now,
 +        });
-+        yield* eventSink.write({
-+          events: pendingRequest.events.map((event) =>
-+            event.type === "turn-item.updated"
++        const userInputEvents = pendingRequest.events.map((event) =>
++          event.type === "turn-item.updated"
++            ? {
++                ...event,
++                payload: {
++                  ...event.payload,
++                  type: "user_input_request" as const,
++                  questions: [
++                    { id: "action", header: "Action", question: "Continue?", options: [] },
++                  ],
++                },
++              }
++            : event.type === "runtime-request.updated"
 +              ? {
 +                  ...event,
-+                  payload: {
-+                    ...event.payload,
-+                    type: "user_input_request",
-+                    questions: [
-+                      { id: "action", header: "Action", question: "Continue?", options: [] },
-+                    ],
-+                  },
++                  payload: { ...event.payload, kind: "user_input" as const },
 +                }
-+              : event.type === "runtime-request.updated"
-+                ? { ...event, payload: { ...event.payload, kind: "user_input" } }
-+                : event,
-+          ),
-+        });
-+        const initialProjection = yield* projectionStore.getThreadProjection(threadId);
-+        const initialRequest = initialProjection.runtimeRequests.at(-1)!;
-+        const initialTurnItem = initialProjection.turnItems.find(
-+          (item) => item.type === "user_input_request" && item.requestId === initialRequest.id,
++              : event,
++        );
++        const initialRequestEvent = userInputEvents.find(
++          (event) => event.type === "runtime-request.updated",
 +        )!;
-+        assert.isDefined(initialRequest);
-+        assert.isDefined(initialTurnItem);
++        const initialTurnItemEvent = userInputEvents.find(
++          (event) => event.type === "turn-item.updated",
++        )!;
++        const initialRequest = initialRequestEvent.payload;
++        const initialTurnItem = initialTurnItemEvent.payload;
 +
-+        // Simulate an ACP child exiting with code 0 when the session scope closes during shutdown:
-+        // its teardown emits a cancelled runtime request, failed turn item, and failed turn.terminal.
++        yield* eventSink.write({ events: userInputEvents });
++
++        // Hold open in handshake so shutdown begins before the session finishes starting,
++        // leaving the event pump and subscriber live when shutdown-time exit events arrive.
++        const opening = yield* manager
++          .open({
++            threadId,
++            providerSessionId,
++            modelSelection,
++            runtimePolicy,
++          })
++          .pipe(Effect.forkChild({ startImmediately: true }));
++        yield* Deferred.await(handshakeStarted);
++        yield* manager.shutdown;
++        yield* Deferred.succeed(resumeOpen, undefined);
++        const runtime = yield* Fiber.join(opening);
++
 +        const receivedSignals: Array<unknown> = [];
-+        cancelOnClose = (events) =>
-+          Effect.gen(function* () {
-+            yield* Queue.offer(events, {
-+              type: "runtime_request.updated",
-+              runtimeRequest: {
-+                ...initialRequest,
-+                status: "cancelled",
-+                responseCapability: {
-+                  type: "not_resumable",
-+                  reason: "AcpProcessExitedError: ACP process exited with code 0",
-+                },
-+                resolvedAt: now,
-+              },
-+            });
-+            yield* Queue.offer(events, {
-+              type: "turn_item.updated",
-+              turnItem: {
-+                ...initialTurnItem,
-+                status: "failed",
-+                completedAt: now,
-+                updatedAt: now,
-+              },
-+            });
-+            yield* Queue.offer(events, {
-+              type: "turn.terminal",
-+              threadId,
-+              providerThreadId: providerThread.id,
-+              providerTurnId: initialRequest.providerTurnId!,
-+              runOrdinal: 1,
-+              status: "failed",
-+              failure: makeProviderFailure({
-+                cause: new Error("AcpProcessExitedError: ACP process exited with code 0"),
-+                class: "provider_error",
-+              }),
-+            });
-+            // Yield so an unguarded event pump processes the shutdown-time events.
-+            yield* Effect.yieldNow;
-+            yield* Effect.yieldNow;
-+          });
-+
-+        const runtime = yield* manager.open({
-+          threadId,
-+          providerSessionId,
-+          modelSelection,
-+          runtimePolicy,
-+        });
 +        const subscriber = yield* runtime.events.pipe(
 +          Stream.runForEach((event) =>
 +            Effect.sync(() => {
@@ -175,19 +106,75 @@ index e6652c5963..6dbd309ee8 100644
 +          Effect.forkChild({ startImmediately: true }),
 +        );
 +        yield* Effect.yieldNow;
-+        yield* manager.shutdown;
-+        yield* Fiber.await(subscriber);
++
++        const adapterEvents = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
++        assert.isDefined(adapterEvents);
++
++        // Emit valid ACP exit events (failed terminal, cancelled request, failed turn item)
++        // plus stream end while the session and subscriber are live during shutdown.
++        const lateExitEvents = [
++          {
++            type: "turn.terminal" as const,
++            driver: CODEX_DRIVER,
++            providerThreadId: providerThread.id,
++            providerTurnId,
++            runOrdinal: 1,
++            failureItemOrdinal: 1,
++            status: "failed" as const,
++            failure: makeProviderFailure({
++              cause: new Error("AcpProcessExitedError: ACP process exited with code 0"),
++              class: "provider_error",
++            }),
++            threadDisposition: "reusable" as const,
++          },
++          {
++            type: "runtime_request.updated" as const,
++            driver: CODEX_DRIVER,
++            threadId,
++            runtimeRequest: {
++              ...initialRequest,
++              status: "cancelled" as const,
++              responseCapability: {
++                type: "not_resumable" as const,
++                reason: "AcpProcessExitedError: ACP process exited with code 0",
++              },
++              resolvedAt: now,
++            },
++          },
++          {
++            type: "turn_item.updated" as const,
++            driver: CODEX_DRIVER,
++            turnItem: {
++              ...initialTurnItem,
++              status: "failed" as const,
++              completedAt: now,
++              updatedAt: now,
++            },
++          },
++        ] satisfies ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
++
++        yield* Queue.offerAll(adapterEvents!, lateExitEvents);
++        yield* Queue.end(adapterEvents!);
++        for (let i = 0; i < 10; i++) {
++          yield* Effect.yieldNow;
++        }
++        yield* Fiber.interrupt(subscriber);
 +
 +        const projection = yield* projectionStore.getThreadProjection(threadId);
 +        const request = projection.runtimeRequests.at(-1);
 +        const requestTurnItem = projection.turnItems.find(
 +          (item) => item.type === "user_input_request" && item.requestId === request?.id,
 +        );
-+        // Shutdown must drop shutdown-time turn.terminal failures and keep the user_input request pending.
 +        assert.deepEqual(receivedSignals, []);
 +        assert.equal(request?.status, "pending");
 +        assert.equal(request?.responseCapability.type, "live");
 +        assert.equal(requestTurnItem?.status, "waiting");
++
++        // Preserved question remains answerable after shutdown.
++        yield* runtime.respondToRuntimeRequest({
++          requestId: request!.id,
++          answers: { action: "yes" },
++        });
 +      });
 +
 +      yield* effect.pipe(
@@ -195,7 +182,10 @@ index e6652c5963..6dbd309ee8 100644
 +          layerTest({
 +            state,
 +            idleTimeoutMs: 1000,
-+            onScopeClose: ({ events }) => (cancelOnClose ? cancelOnClose(events) : Effect.void),
++            beforeOpen: () =>
++              Deferred.succeed(handshakeStarted, undefined).pipe(
++                Effect.andThen(Deferred.await(resumeOpen)),
++              ),
 +          }),
 +        ),
 +      );
@@ -295,7 +285,7 @@ index e6652c5963..6dbd309ee8 100644
    "ProviderSessionManagerV2 cancels a pending approval when a detach releases its session",
    () =>
 diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/server/src/orchestration-v2/ProviderSessionManager.ts
-index 291ac02272..08686d409b 100644
+index 291ac02272..bb45c37efa 100644
 --- a/apps/server/src/orchestration-v2/ProviderSessionManager.ts
 +++ b/apps/server/src/orchestration-v2/ProviderSessionManager.ts
 @@ -340,6 +340,8 @@ interface LiveSessionEntry {
@@ -307,17 +297,25 @@ index 291ac02272..08686d409b 100644
    readonly idleGeneration: number;
    readonly busyTurns: ReadonlySet<string>;
    readonly idleFiber: Fiber.Fiber<void, never> | null;
-@@ -1533,6 +1535,9 @@ export const layerWithOptions = (
-               onNone: () => Effect.void,
-               onSome: (entry) =>
-                 Effect.gen(function* () {
-+                  if (input.reason === "server_shutdown") {
-+                    entry.dropEvents.active = true;
-+                  }
-                   const detachedThread =
-                     input.detachedThreadId === undefined
-                       ? {}
-@@ -3018,7 +3023,7 @@ export const layerWithOptions = (
+@@ -1419,6 +1421,7 @@ export const layerWithOptions = (
+       const removeLiveEntry = Effect.fn("ProviderSessionManager.removeLiveEntry")(
+         function* (input: {
+           readonly providerSessionId: ProviderSessionId;
++          readonly reason?: ProviderSessionReleaseReason;
+           readonly onlyIfIdleGeneration?: number;
+           readonly keepIfBusyOtherThan?: OwnBusyTurns;
+           readonly keepIf?: Effect.Effect<boolean>;
+@@ -1428,6 +1431,9 @@ export const layerWithOptions = (
+           if (candidate === undefined) {
+             return [Option.none<LiveSessionEntry>(), yield* DateTime.now] as const;
+           }
++          if (input.reason === "server_shutdown") {
++            candidate.dropEvents.active = true;
++          }
+           const remove = (keepRequested: boolean) =>
+             Effect.zip(
+               Ref.modify(sessions, (current) => {
+@@ -3018,7 +3024,7 @@ export const layerWithOptions = (
            // Several adapters never end their event stream, and a parked pump retains the whole session.
            Stream.interruptWhen(Deferred.await(sessionClosed)),
            Stream.runForEach((nativeEvent) => {
@@ -326,7 +324,7 @@ index 291ac02272..08686d409b 100644
              // Live output bypasses persistence and subscribers so floods cannot delay domain events.
              if (nativeEvent.type === "command_output.delta") {
                return commandOutput.append(nativeEvent);
-@@ -3163,7 +3168,7 @@ export const layerWithOptions = (
+@@ -3163,7 +3169,7 @@ export const layerWithOptions = (
            Effect.exit,
            Effect.flatMap((exit) =>
              Effect.gen(function* () {
@@ -335,7 +333,7 @@ index 291ac02272..08686d409b 100644
                const current = (yield* Ref.get(sessions)).get(
                  sessionKey(entry.runtime.providerSessionId),
                );
-@@ -3211,6 +3216,7 @@ export const layerWithOptions = (
+@@ -3211,6 +3217,7 @@ export const layerWithOptions = (
        // Shutdown must fit the launcher's 5 s deadline with up to 15 sessions.
        const sessionScopes = yield* Scope.make("parallel");
        const shutdown = Effect.gen(function* () {
@@ -343,7 +341,7 @@ index 291ac02272..08686d409b 100644
          const activeSessions = [...(yield* Ref.get(sessions)).values()];
          yield* Effect.forEach(
            activeSessions,
-@@ -3380,6 +3386,7 @@ export const layerWithOptions = (
+@@ -3380,6 +3387,7 @@ export const layerWithOptions = (
                  eventSubscribers,
                  requestEventPermit: yield* Semaphore.make(1),
                  scope: sessionScope,
