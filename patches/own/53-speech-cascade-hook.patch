@@ -1,0 +1,900 @@
+diff --git a/apps/server/src/speech/SpeechService.test.ts b/apps/server/src/speech/SpeechService.test.ts
+index a4ed5455cd..f326782074 100644
+--- a/apps/server/src/speech/SpeechService.test.ts
++++ b/apps/server/src/speech/SpeechService.test.ts
+@@ -1,4 +1,7 @@
+ import { beforeEach, expect, vi } from "vite-plus/test";
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
+ import { it } from "@effect/vitest";
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import * as Effect from "effect/Effect";
+@@ -17,6 +20,7 @@ import * as ServerSettings from "../serverSettings.ts";
+ import { listNativeSpeechGpuDevices } from "./native.ts";
+ import * as SpeechModelStore from "./SpeechModelStore.ts";
+ import * as SpeechService from "./SpeechService.ts";
++import { resetSpeechCascadeTokenCacheForTests } from "./cascade.ts";
+ import { SILERO_VAD } from "./silero.ts";
+ 
+ const native = vi.hoisted(() => ({
+@@ -1001,3 +1005,162 @@ it.effect("does not restart a stream cancelled while native finalization is pend
+     expect(native.reset).toHaveBeenCalledOnce();
+   }).pipe(Effect.provide(layer)),
+ );
++
++const withCascadeEnv = <A, E, R>(
++  effect: (tokenFile: string) => Effect.Effect<A, E, R>,
++) =>
++  Effect.acquireUseRelease(
++    Effect.sync(() => {
++      resetSpeechCascadeTokenCacheForTests();
++      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-speech-svc-cascade-"));
++      const tokenFile = path.join(dir, "laptop.token");
++      fs.writeFileSync(tokenFile, "svc-secret\n", { mode: 0o600 });
++      const prevUrl = process.env.T3CODE_SPEECH_CASCADE_URL;
++      const prevToken = process.env.T3CODE_SPEECH_CASCADE_TOKEN_FILE;
++      process.env.T3CODE_SPEECH_CASCADE_URL = "http://127.0.0.1:8179/transcribe";
++      process.env.T3CODE_SPEECH_CASCADE_TOKEN_FILE = tokenFile;
++      return { dir, tokenFile, prevUrl, prevToken };
++    }),
++    ({ tokenFile }) => effect(tokenFile),
++    ({ dir, prevUrl, prevToken }) =>
++      Effect.sync(() => {
++        if (prevUrl === undefined) delete process.env.T3CODE_SPEECH_CASCADE_URL;
++        else process.env.T3CODE_SPEECH_CASCADE_URL = prevUrl;
++        if (prevToken === undefined) delete process.env.T3CODE_SPEECH_CASCADE_TOKEN_FILE;
++        else process.env.T3CODE_SPEECH_CASCADE_TOKEN_FILE = prevToken;
++        resetSpeechCascadeTokenCacheForTests();
++        fs.rmSync(dir, { recursive: true, force: true });
++        vi.unstubAllGlobals();
++      }),
++  );
++
++it.effect("disables streaming flags and skips local prepareModel when speech cascade is configured", () =>
++  withCascadeEnv(() =>
++    Effect.gen(function* () {
++      const speech = yield* SpeechService.SpeechService;
++      const status = yield* speech.status;
++      expect(status).toMatchObject({
++        supported: true,
++        state: "ready",
++        supportsStreaming: false,
++        supportsBufferedStreaming: false,
++      });
++      yield* speech.prepareModel;
++      expect(loadNative).not.toHaveBeenCalled();
++    }),
++  ).pipe(Effect.provide(layer)),
++);
++
++it.effect("uses cascade output with fuzzy corrector and correction cue without loading native model", () =>
++  withCascadeEnv(() =>
++    Effect.gen(function* () {
++      const fetchMock = vi.fn(
++        async () =>
++          new Response(
++            JSON.stringify({
++              text: "um use selkis sorry Del City please",
++              tier: "omarchy-cloud",
++              speechDetected: true,
++              usedVocabulary: false,
++            }),
++            { status: 200, headers: { "Content-Type": "application/json" } },
++          ),
++      );
++      vi.stubGlobal("fetch", fetchMock);
++      const speech = yield* SpeechService.SpeechService;
++      const text = yield* speech.transcribe(pcm(), {
++        ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
++        speechLanguage: "en",
++        speechCorrectionWord: "sorry",
++        speechCustomWords: [
++          { term: "Selkies", aliases: [] },
++          { term: "Delicity", aliases: ["Del City"] },
++        ],
++      });
++      expect(fetchMock).toHaveBeenCalledOnce();
++      expect(loadNative).not.toHaveBeenCalled();
++      expect(text).toContain("Selkies");
++      expect(text).toContain("Delicity");
++      expect(text).toContain("sorry");
++    }),
++  ).pipe(Effect.provide(layer)),
++);
++
++it.effect("short-circuits all-zero PCM and accepts explicit speechDetected false without Tier 3", () =>
++  withCascadeEnv(() =>
++    Effect.gen(function* () {
++      const fetchMock = vi.fn(
++        async () =>
++          new Response(
++            JSON.stringify({
++              text: "",
++              tier: "gemini-3.5-transcribe",
++              speechDetected: false,
++              usedVocabulary: true,
++            }),
++            { status: 200, headers: { "Content-Type": "application/json" } },
++          ),
++      );
++      vi.stubGlobal("fetch", fetchMock);
++      const speech = yield* SpeechService.SpeechService;
++      const zeros = new Uint8Array(new Float32Array([0, 0, 0, 0]).buffer);
++      expect(yield* speech.transcribe(zeros, DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS)).toBe("");
++      expect(fetchMock).not.toHaveBeenCalled();
++      const quietNonZero = new Uint8Array(new Float32Array([0, 1e-6, 0, -1e-6]).buffer);
++      expect(yield* speech.transcribe(quietNonZero, DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS)).toBe("");
++      expect(fetchMock).toHaveBeenCalledOnce();
++      expect(loadNative).not.toHaveBeenCalled();
++    }),
++  ).pipe(Effect.provide(layer)),
++);
++
++it.effect("falls back to local native inference on cascade 503 and skips cascade for translation", () =>
++  withCascadeEnv(() =>
++    Effect.gen(function* () {
++      const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
++      vi.stubGlobal("fetch", fetchMock);
++      native.transcribe.mockResolvedValue({ text: "local fallback text" });
++      const speech = yield* SpeechService.SpeechService;
++      const fallback = yield* speech.transcribe(pcm(), DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS);
++      expect(fetchMock).toHaveBeenCalledOnce();
++      expect(loadNative).toHaveBeenCalledOnce();
++      expect(fallback).toBe("local fallback text");
++
++      fetchMock.mockClear();
++      const translated = yield* speech.transcribe(pcm(), {
++        ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
++        speechLanguage: "fr",
++        speechTranslateToEnglish: true,
++      });
++      expect(fetchMock).not.toHaveBeenCalled();
++      expect(translated).toBe("local fallback text");
++    }),
++  ).pipe(Effect.provide(layer)),
++);
++
++it.effect("does not fall back to local native inference when caller interrupts cascade", () =>
++  withCascadeEnv(() =>
++    Effect.gen(function* () {
++      const started = Promise.withResolvers<void>();
++      const fetchMock = vi.fn(
++        (_url: string | URL | Request, init?: RequestInit) =>
++          new Promise<Response>((_resolve, reject) => {
++            started.resolve();
++            init?.signal?.addEventListener("abort", () =>
++              reject(init.signal?.reason ?? new Error("aborted")),
++            );
++          }),
++      );
++      vi.stubGlobal("fetch", fetchMock);
++      const speech = yield* SpeechService.SpeechService;
++      const fiber = yield* Effect.forkChild(
++        speech.transcribe(pcm(), DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS),
++      );
++      yield* Effect.promise(() => started.promise);
++      yield* Fiber.interrupt(fiber);
++      const exit = yield* Fiber.await(fiber);
++      expect(Exit.isFailure(exit)).toBe(true);
++      expect(loadNative).not.toHaveBeenCalled();
++    }),
++  ).pipe(Effect.provide(layer)),
++);
+diff --git a/apps/server/src/speech/SpeechService.ts b/apps/server/src/speech/SpeechService.ts
+index ba25233a32..7bd13a56b7 100644
+--- a/apps/server/src/speech/SpeechService.ts
++++ b/apps/server/src/speech/SpeechService.ts
+@@ -23,6 +23,12 @@ import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ 
+ import * as ServerSettings from "../serverSettings.ts";
++import {
++  isAllZeroPcm,
++  isSpeechCascadeConfigured,
++  resolveSpeechCascadeConfig,
++  transcribeViaSpeechCascade,
++} from "./cascade.ts";
+ import {
+   makeSpeechTextCorrector,
+   normalizeSpeechCustomWords,
+@@ -468,14 +474,15 @@ const make = Effect.gen(function* () {
+       (loadedModelId === definition.id &&
+         loadedAcceleration === "auto" &&
+         model?.backend.toLowerCase() === "cpu");
++    const cascadeConfigured = isSpeechCascadeConfigured();
+     return {
+       supported: true,
+       state: activeTranscriptions > 0 ? "transcribing" : ready ? "ready" : "missing-model",
+       modelId: definition.id,
+       model: definition.name,
+       size: definition.size,
+-      supportsStreaming: definition.supportsStreaming,
+-      supportsBufferedStreaming: true,
++      supportsStreaming: cascadeConfigured ? false : definition.supportsStreaming,
++      supportsBufferedStreaming: !cascadeConfigured,
+       supportsModelLinking: true,
+       supportsTranslation: definition.supportsTranslation,
+       languages: definition.languages,
+@@ -559,32 +566,35 @@ const make = Effect.gen(function* () {
+     ).trim();
+   };
+ 
+-  const prepareModel = readSettings("model preparation").pipe(
+-    Effect.flatMap((settings) =>
+-      exclusive(
+-        "model preparation",
+-        requireSupported.pipe(
+-          Effect.andThen(installedModelPath(selectedModel(settings))),
+-          Effect.flatMap((modelPath) =>
+-            attempt("model preparation", (signal) =>
+-              loadModel(
+-                modelPath,
+-                selectedModel(settings),
+-                AbortSignal.any([signal, lifetime.signal]),
+-                settings.speechAcceleration,
++  const prepareModel = Effect.suspend(() => {
++    if (isSpeechCascadeConfigured()) return Effect.void;
++    return readSettings("model preparation").pipe(
++      Effect.flatMap((settings) =>
++        exclusive(
++          "model preparation",
++          requireSupported.pipe(
++            Effect.andThen(installedModelPath(selectedModel(settings))),
++            Effect.flatMap((modelPath) =>
++              attempt("model preparation", (signal) =>
++                loadModel(
++                  modelPath,
++                  selectedModel(settings),
++                  AbortSignal.any([signal, lifetime.signal]),
++                  settings.speechAcceleration,
++                ),
++              ).pipe(
++                Effect.timeout("2 minutes"),
++                Effect.catchTags({
++                  TimeoutError: (cause) =>
++                    Effect.fail(new SpeechOperationError({ operation: "model preparation", cause })),
++                }),
+               ),
+-            ).pipe(
+-              Effect.timeout("2 minutes"),
+-              Effect.catchTags({
+-                TimeoutError: (cause) =>
+-                  Effect.fail(new SpeechOperationError({ operation: "model preparation", cause })),
+-              }),
+             ),
+           ),
+         ),
+       ),
+-    ),
+-  );
++    );
++  });
+ 
+   const silenceModelPath = Effect.fn("SpeechService.silenceModelPath")(function* (
+     loaded: LoadedModel,
+@@ -608,6 +618,17 @@ const make = Effect.gen(function* () {
+             catch: (cause) => speechError("transcription", cause),
+           });
+           if (pcm.length === 0) return "";
++          const audioSec = Number((pcm.length / SAMPLE_RATE).toFixed(2));
++          const startedAt = now();
++          const cascadeConfig = resolveSpeechCascadeConfig();
++          if (cascadeConfig !== null && isAllZeroPcm(pcm)) {
++            yield* Effect.logInfo("speech.transcribe.complete", {
++              tier: "silence-skip",
++              audioSec,
++              totalMs: Math.max(0, now() - startedAt),
++            });
++            return "";
++          }
+           activeTranscriptions += 1;
+           return yield* Effect.gen(function* () {
+             const definition = selectedModel(settings);
+@@ -616,6 +637,70 @@ const make = Effect.gen(function* () {
+               options.speechTranslateToEnglish &&
+               definition.supportsTranslation &&
+               language !== "en";
++            const dictionary = normalizeSpeechCustomWords(options.speechCustomWords);
++            const customWords = dictionary.map(({ term }) => term);
++            const recognitionWords = speechRecognitionWords(options.speechHints, customWords);
++            let cascadeFallbackReason: string | undefined;
++            let cascadeRequestId: string | undefined;
++            if (!translateToEnglish && cascadeConfig !== null) {
++              if ("invalidReason" in cascadeConfig) {
++                cascadeFallbackReason = `invalid_config:${cascadeConfig.invalidReason}`;
++                yield* Effect.logWarning("speech.cascade.invalid_config", {
++                  reason: cascadeConfig.invalidReason,
++                });
++              } else {
++                const outcome = yield* Effect.tryPromise({
++                  try: (signal) =>
++                    transcribeViaSpeechCascade({
++                      pcmBytes,
++                      pcmSampleCount: pcm.length,
++                      header: {
++                        language: options.speechLanguage,
++                        vocabulary: recognitionWords,
++                        silenceFiltering: options.speechSilenceFiltering,
++                      },
++                      signal: AbortSignal.any([signal, lifetime.signal]),
++                    }),
++                  catch: (cause) => speechError("transcription", cause),
++                });
++                cascadeRequestId = outcome.requestId;
++                if (outcome.ok) {
++                  if (!outcome.speechDetected && outcome.text.trim() === "") {
++                    yield* Effect.logInfo("speech.transcribe.complete", {
++                      requestId: outcome.requestId,
++                      tier: outcome.tier,
++                      speechDetected: false,
++                      audioSec,
++                      totalMs: Math.max(0, now() - startedAt),
++                    });
++                    return "";
++                  }
++                  const correct = makeSpeechTextCorrector(
++                    outcome.usedVocabulary ? [] : customWords,
++                    dictionary,
++                  );
++                  const finalized = finalizeTranscript(
++                    correct(outcome.text),
++                    options,
++                    language === "auto" ? undefined : language,
++                  );
++                  yield* Effect.logInfo("speech.transcribe.complete", {
++                    requestId: outcome.requestId,
++                    tier: outcome.tier,
++                    audioSec,
++                    totalMs: Math.max(0, now() - startedAt),
++                  });
++                  return finalized;
++                }
++                cascadeFallbackReason = outcome.reason;
++                yield* Effect.logWarning("speech.cascade.fallback", {
++                  requestId: outcome.requestId,
++                  reason: outcome.reason,
++                  audioSec,
++                  cascadeMs: outcome.elapsedMs,
++                });
++              }
++            }
+             const modelPath = yield* installedModelPath(definition);
+             const loaded = yield* Effect.tryPromise({
+               try: (signal) =>
+@@ -628,9 +713,6 @@ const make = Effect.gen(function* () {
+               catch: (cause) => speechError("model preparation", cause),
+             });
+             const vadPath = yield* silenceModelPath(loaded, options, false);
+-            const dictionary = normalizeSpeechCustomWords(options.speechCustomWords);
+-            const customWords = dictionary.map(({ term }) => term);
+-            const recognitionWords = speechRecognitionWords(options.speechHints, customWords);
+             // The vocabulary capability guarantees plain transcription, not translation.
+             const vocabularyFor = (inference: LoadedModel) =>
+               inference.supportsVocabulary && !translateToEnglish ? recognitionWords : [];
+@@ -687,11 +769,21 @@ const make = Effect.gen(function* () {
+               vocabularyFor(inference).length > 0 ? [] : customWords,
+               dictionary,
+             );
+-            return finalizeTranscript(
++            const finalized = finalizeTranscript(
+               correct(result.text),
+               options,
+               translateToEnglish ? "en" : language === "auto" ? undefined : language,
+             );
++            if (cascadeConfig !== null) {
++              yield* Effect.logInfo("speech.transcribe.complete", {
++                ...(cascadeRequestId ? { requestId: cascadeRequestId } : {}),
++                tier: `local:${definition.id}`,
++                ...(cascadeFallbackReason ? { fallbackReason: cascadeFallbackReason } : {}),
++                audioSec,
++                totalMs: Math.max(0, now() - startedAt),
++              });
++            }
++            return finalized;
+           }).pipe(
+             Effect.ensuring(
+               Effect.sync(() => {
+diff --git a/apps/server/src/speech/cascade.test.ts b/apps/server/src/speech/cascade.test.ts
+new file mode 100644
+index 0000000000..219ba86a4c
+--- /dev/null
++++ b/apps/server/src/speech/cascade.test.ts
+@@ -0,0 +1,213 @@
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
++import {
++  computeSpeechCascadeBudgetMs,
++  encodeSpeechCascadeBody,
++  isAllZeroPcm,
++  isSpeechCascadeConfigured,
++  resetSpeechCascadeTokenCacheForTests,
++  resolveSpeechCascadeConfig,
++  SpeechCascadeAbortedError,
++  transcribeViaSpeechCascade,
++} from "./cascade.ts";
++
++describe("speech cascade helper", () => {
++  let tmpDir: string;
++  let tokenFile: string;
++
++  beforeEach(() => {
++    resetSpeechCascadeTokenCacheForTests();
++    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-cascade-test-"));
++    tokenFile = path.join(tmpDir, "laptop.token");
++    fs.writeFileSync(tokenFile, "secret-token-123\n", { mode: 0o600 });
++  });
++
++  afterEach(() => {
++    fs.rmSync(tmpDir, { recursive: true, force: true });
++    vi.restoreAllMocks();
++  });
++
++  it("validates loopback-only URL and requires both env variables", () => {
++    expect(resolveSpeechCascadeConfig({})).toBeNull();
++    expect(isSpeechCascadeConfigured({})).toBe(false);
++    expect(resolveSpeechCascadeConfig({ T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe" })).toEqual({
++      invalidReason: expect.stringContaining("Both"),
++    });
++    expect(
++      resolveSpeechCascadeConfig({
++        T3CODE_SPEECH_CASCADE_URL: "http://100.64.0.1:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      }),
++    ).toEqual({
++      invalidReason: expect.stringContaining("127.0.0.1 or localhost"),
++    });
++    expect(
++      resolveSpeechCascadeConfig({
++        T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      }),
++    ).toEqual({
++      url: "http://127.0.0.1:8179/transcribe",
++      tokenFile,
++    });
++    expect(
++      isSpeechCascadeConfigured({
++        T3CODE_SPEECH_CASCADE_URL: "http://localhost:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      }),
++    ).toBe(true);
++  });
++
++  it("only treats all-zero PCM as digital silence", () => {
++    expect(isAllZeroPcm(new Float32Array([0, 0, 0]))).toBe(true);
++    expect(isAllZeroPcm(new Float32Array([0, 1e-6, 0]))).toBe(false);
++    expect(isAllZeroPcm(new Float32Array([-0.00001]))).toBe(false);
++  });
++
++  it("scales remote budget with audio duration and clamps between 18s and 35s", () => {
++    expect(computeSpeechCascadeBudgetMs(2)).toBe(18_000);
++    expect(computeSpeechCascadeBudgetMs(30)).toBe(26_000);
++    expect(computeSpeechCascadeBudgetMs(120)).toBe(35_000);
++    expect(computeSpeechCascadeBudgetMs(300)).toBe(35_000);
++  });
++
++  it("frames header JSON and raw PCM bytes cleanly", () => {
++    const pcm = new Uint8Array(new Float32Array([0.5, -0.5]).buffer);
++    const body = encodeSpeechCascadeBody(
++      { language: "fr", vocabulary: ["Delicity", "Selkies"], silenceFiltering: true },
++      pcm,
++    );
++    const headerLen = new DataView(body.buffer).getUint32(0, false);
++    const header = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + headerLen)));
++    expect(header).toEqual({
++      language: "fr",
++      vocabulary: ["Delicity", "Selkies"],
++      silenceFiltering: true,
++    });
++    expect([...new Float32Array(body.slice(4 + headerLen).buffer)]).toEqual([0.5, -0.5]);
++  });
++
++  it("returns ok with bearer token, headers, and explicit speechDetected false", async () => {
++    const pcm = new Uint8Array(new Float32Array(16_000).fill(0.1).buffer);
++    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
++      const headers = init?.headers as Record<string, string>;
++      expect(headers.Authorization).toBe("Bearer secret-token-123");
++      expect(headers["X-Deadline-Ms"]).toBe("18000");
++      expect(headers["X-Request-Id"]).toMatch(/^[0-9a-f-]{36}$/);
++      expect(init?.redirect).toBe("error");
++      return new Response(
++        JSON.stringify({
++          text: "",
++          tier: "gemini-3.5-transcribe",
++          speechDetected: false,
++          usedVocabulary: true,
++        }),
++        { status: 200, headers: { "Content-Type": "application/json" } },
++      );
++    });
++    const outcome = await transcribeViaSpeechCascade({
++      pcmBytes: pcm,
++      pcmSampleCount: 16_000,
++      header: { language: "auto", vocabulary: ["T3 Code"], silenceFiltering: true },
++      signal: new AbortController().signal,
++      env: {
++        T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      },
++      fetchImpl: fetchMock as unknown as typeof fetch,
++    });
++    expect(outcome).toMatchObject({
++      ok: true,
++      text: "",
++      tier: "gemini-3.5-transcribe",
++      speechDetected: false,
++      usedVocabulary: true,
++    });
++  });
++
++  it("treats blank text without speechDetected false as a fallback failure", async () => {
++    const pcm = new Uint8Array(new Float32Array([0.2]).buffer);
++    const fetchMock = vi.fn(
++      async () =>
++        new Response(JSON.stringify({ text: "   ", tier: "omarchy-cloud" }), {
++          status: 200,
++          headers: { "Content-Type": "application/json" },
++        }),
++    );
++    const outcome = await transcribeViaSpeechCascade({
++      pcmBytes: pcm,
++      pcmSampleCount: 1,
++      header: { language: "auto", vocabulary: [], silenceFiltering: true },
++      signal: new AbortController().signal,
++      env: {
++        T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      },
++      fetchImpl: fetchMock as unknown as typeof fetch,
++    });
++    expect(outcome).toMatchObject({ ok: false, reason: "empty_text" });
++  });
++
++  it("rejects oversized responses over 256 KiB and falls back", async () => {
++    const pcm = new Uint8Array(new Float32Array([0.2]).buffer);
++    const big = "x".repeat(300 * 1024);
++    const fetchMock = vi.fn(
++      async () => new Response(JSON.stringify({ text: big }), { status: 200 }),
++    );
++    const outcome = await transcribeViaSpeechCascade({
++      pcmBytes: pcm,
++      pcmSampleCount: 1,
++      header: { language: "auto", vocabulary: [], silenceFiltering: true },
++      signal: new AbortController().signal,
++      env: {
++        T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      },
++      fetchImpl: fetchMock as unknown as typeof fetch,
++    });
++    expect(outcome).toMatchObject({ ok: false, reason: "response_too_large" });
++  });
++
++  it("returns timeout on budget expiry but throws SpeechCascadeAbortedError on caller abort", async () => {
++    const pcm = new Uint8Array(new Float32Array([0.2]).buffer);
++    const hangingFetch = vi.fn(
++      (_url: string | URL | Request, init?: RequestInit) =>
++        new Promise<Response>((_resolve, reject) => {
++          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")));
++        }),
++    );
++
++    const timeoutOutcome = await transcribeViaSpeechCascade({
++      pcmBytes: pcm,
++      pcmSampleCount: 1,
++      header: { language: "auto", vocabulary: [], silenceFiltering: true },
++      signal: new AbortController().signal,
++      env: {
++        T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe",
++        T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++      },
++      fetchImpl: hangingFetch as unknown as typeof fetch,
++      budgetMsOverride: 25,
++    });
++    expect(timeoutOutcome).toMatchObject({ ok: false, reason: "timeout" });
++
++    const caller = new AbortController();
++    setTimeout(() => caller.abort(new Error("user_cancelled")), 15);
++    await expect(
++      transcribeViaSpeechCascade({
++        pcmBytes: pcm,
++        pcmSampleCount: 1,
++        header: { language: "auto", vocabulary: [], silenceFiltering: true },
++        signal: caller.signal,
++        env: {
++          T3CODE_SPEECH_CASCADE_URL: "http://127.0.0.1:8179/transcribe",
++          T3CODE_SPEECH_CASCADE_TOKEN_FILE: tokenFile,
++        },
++        fetchImpl: hangingFetch as unknown as typeof fetch,
++        budgetMsOverride: 5_000,
++      }),
++    ).rejects.toBeInstanceOf(SpeechCascadeAbortedError);
++  });
++});
+diff --git a/apps/server/src/speech/cascade.ts b/apps/server/src/speech/cascade.ts
+new file mode 100644
+index 0000000000..b2ceadd44e
+--- /dev/null
++++ b/apps/server/src/speech/cascade.ts
+@@ -0,0 +1,278 @@
++import * as crypto from "node:crypto";
++import * as fs from "node:fs";
++
++export interface SpeechCascadeConfig {
++  readonly url: string;
++  readonly tokenFile: string;
++}
++
++export interface SpeechCascadeHeader {
++  readonly language: string;
++  readonly vocabulary: readonly string[];
++  readonly silenceFiltering: boolean;
++}
++
++export type SpeechCascadeOutcome =
++  | {
++      readonly ok: true;
++      readonly text: string;
++      readonly tier: string;
++      readonly speechDetected: boolean;
++      readonly usedVocabulary: boolean;
++      readonly requestId: string;
++      readonly elapsedMs: number;
++    }
++  | {
++      readonly ok: false;
++      readonly reason: string;
++      readonly requestId: string;
++      readonly elapsedMs: number;
++    };
++
++export class SpeechCascadeAbortedError extends Error {
++  constructor(cause?: unknown) {
++    super("Speech cascade aborted by caller.", { cause });
++    this.name = "SpeechCascadeAbortedError";
++  }
++}
++
++const MAX_CASCADE_RESPONSE_BYTES = 256 * 1024;
++const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost"]);
++
++let cachedToken: { readonly path: string; readonly mtimeMs: number; readonly value: string } | null =
++  null;
++
++export function resetSpeechCascadeTokenCacheForTests(): void {
++  cachedToken = null;
++}
++
++export function resolveSpeechCascadeConfig(
++  env: NodeJS.ProcessEnv = process.env,
++): SpeechCascadeConfig | { readonly invalidReason: string } | null {
++  const rawUrl = env.T3CODE_SPEECH_CASCADE_URL?.trim() ?? "";
++  const rawTokenFile = env.T3CODE_SPEECH_CASCADE_TOKEN_FILE?.trim() ?? "";
++  if (!rawUrl && !rawTokenFile) return null;
++  if (!rawUrl || !rawTokenFile) {
++    return {
++      invalidReason: "Both T3CODE_SPEECH_CASCADE_URL and T3CODE_SPEECH_CASCADE_TOKEN_FILE are required.",
++    };
++  }
++  let parsed: URL;
++  try {
++    parsed = new URL(rawUrl);
++  } catch {
++    return { invalidReason: "Invalid T3CODE_SPEECH_CASCADE_URL." };
++  }
++  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
++    return { invalidReason: "T3CODE_SPEECH_CASCADE_URL must use http or https." };
++  }
++  if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
++    return { invalidReason: "T3CODE_SPEECH_CASCADE_URL must target 127.0.0.1 or localhost." };
++  }
++  return { url: parsed.toString(), tokenFile: rawTokenFile };
++}
++
++export function isSpeechCascadeConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
++  const resolved = resolveSpeechCascadeConfig(env);
++  return resolved !== null && "url" in resolved;
++}
++
++export function isAllZeroPcm(pcm: Float32Array): boolean {
++  for (let index = 0; index < pcm.length; index += 1) {
++    if (pcm[index] !== 0) return false;
++  }
++  return true;
++}
++
++export function computeSpeechCascadeBudgetMs(audioSec: number): number {
++  const safeSec = Number.isFinite(audioSec) && audioSec > 0 ? audioSec : 0;
++  return Math.min(35_000, Math.max(18_000, Math.round(safeSec * 400) + 14_000));
++}
++
++export function encodeSpeechCascadeBody(
++  header: SpeechCascadeHeader,
++  pcmBytes: Uint8Array,
++): Uint8Array {
++  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
++  const body = new Uint8Array(4 + headerBytes.byteLength + pcmBytes.byteLength);
++  new DataView(body.buffer).setUint32(0, headerBytes.byteLength, false);
++  body.set(headerBytes, 4);
++  body.set(pcmBytes, 4 + headerBytes.byteLength);
++  return body;
++}
++
++function readBearerToken(tokenFile: string): string {
++  // @effect-diagnostics-next-line nodeBuiltinImport:off
++  const stat = fs.statSync(tokenFile);
++  if (cachedToken && cachedToken.path === tokenFile && cachedToken.mtimeMs === stat.mtimeMs) {
++    return cachedToken.value;
++  }
++  const value = fs.readFileSync(tokenFile, "utf8").trim();
++  if (!value) throw new Error("Speech cascade token file is empty.");
++  cachedToken = { path: tokenFile, mtimeMs: stat.mtimeMs, value };
++  return value;
++}
++
++async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
++  const contentLength = Number(response.headers.get("content-length"));
++  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
++    throw new Error("response_too_large");
++  }
++  if (!response.body) {
++    const buffer = await response.arrayBuffer();
++    if (buffer.byteLength > maxBytes) throw new Error("response_too_large");
++    return new TextDecoder().decode(buffer);
++  }
++  const reader = response.body.getReader();
++  const chunks: Uint8Array[] = [];
++  let total = 0;
++  try {
++    while (true) {
++      const { done, value } = await reader.read();
++      if (done) break;
++      if (!value) continue;
++      total += value.byteLength;
++      if (total > maxBytes) {
++        await reader.cancel().catch(() => undefined);
++        throw new Error("response_too_large");
++      }
++      chunks.push(value);
++    }
++  } finally {
++    reader.releaseLock();
++  }
++  const merged = new Uint8Array(total);
++  let offset = 0;
++  for (const chunk of chunks) {
++    merged.set(chunk, offset);
++    offset += chunk.byteLength;
++  }
++  return new TextDecoder().decode(merged);
++}
++
++export async function transcribeViaSpeechCascade(input: {
++  readonly pcmBytes: Uint8Array;
++  readonly pcmSampleCount: number;
++  readonly header: SpeechCascadeHeader;
++  readonly signal: AbortSignal;
++  readonly env?: NodeJS.ProcessEnv;
++  readonly fetchImpl?: typeof fetch;
++  readonly budgetMsOverride?: number;
++}): Promise<SpeechCascadeOutcome> {
++  const startedAt = Date.now();
++  const requestId = crypto.randomUUID();
++  const resolved = resolveSpeechCascadeConfig(input.env ?? process.env);
++  if (!resolved) {
++    return { ok: false, reason: "not_configured", requestId, elapsedMs: Date.now() - startedAt };
++  }
++  if ("invalidReason" in resolved) {
++    return {
++      ok: false,
++      reason: `invalid_config:${resolved.invalidReason}`,
++      requestId,
++      elapsedMs: Date.now() - startedAt,
++    };
++  }
++  if (input.signal.aborted) {
++    throw new SpeechCascadeAbortedError(input.signal.reason);
++  }
++
++  let token: string;
++  try {
++    token = readBearerToken(resolved.tokenFile);
++  } catch {
++    return { ok: false, reason: "token_unreadable", requestId, elapsedMs: Date.now() - startedAt };
++  }
++
++  const audioSec = input.pcmSampleCount / 16_000;
++  const budgetMs = input.budgetMsOverride ?? computeSpeechCascadeBudgetMs(audioSec);
++  const body = encodeSpeechCascadeBody(input.header, input.pcmBytes);
++
++  // @effect-diagnostics-next-line abortControllerInEffect:off - Bounds remote cascade attempt independently of caller abort.
++  const timeoutController = new AbortController();
++  const timer = setTimeout(() => timeoutController.abort(new Error("cascade_timeout")), budgetMs);
++  const combinedSignal = AbortSignal.any([input.signal, timeoutController.signal]);
++  const fetchFn = input.fetchImpl ?? fetch;
++
++  try {
++    const response = await fetchFn(resolved.url, {
++      method: "POST",
++      headers: {
++        "Content-Type": "application/octet-stream",
++        Authorization: `Bearer ${token}`,
++        "X-Request-Id": requestId,
++        "X-Deadline-Ms": String(budgetMs),
++      },
++      body: new Uint8Array(body),
++      redirect: "error",
++      signal: combinedSignal,
++    });
++    if (input.signal.aborted) {
++      throw new SpeechCascadeAbortedError(input.signal.reason);
++    }
++    if (!response.ok) {
++      return {
++        ok: false,
++        reason: `http_${response.status}`,
++        requestId,
++        elapsedMs: Date.now() - startedAt,
++      };
++    }
++    const raw = await readBoundedText(response, MAX_CASCADE_RESPONSE_BYTES);
++    let parsed: unknown;
++    try {
++      parsed = JSON.parse(raw);
++    } catch {
++      return { ok: false, reason: "invalid_json", requestId, elapsedMs: Date.now() - startedAt };
++    }
++    if (typeof parsed !== "object" || parsed === null) {
++      return { ok: false, reason: "invalid_payload", requestId, elapsedMs: Date.now() - startedAt };
++    }
++    const record = parsed as Record<string, unknown>;
++    if (typeof record.text !== "string") {
++      return { ok: false, reason: "missing_text", requestId, elapsedMs: Date.now() - startedAt };
++    }
++    const tier = typeof record.tier === "string" && record.tier.trim() ? record.tier.trim() : "cascade";
++    const speechDetected = record.speechDetected !== false;
++    const usedVocabulary = record.usedVocabulary === true;
++    const trimmed = record.text.trim();
++    if (!speechDetected && trimmed === "") {
++      return {
++        ok: true,
++        text: "",
++        tier,
++        speechDetected: false,
++        usedVocabulary,
++        requestId,
++        elapsedMs: Date.now() - startedAt,
++      };
++    }
++    if (trimmed === "") {
++      return { ok: false, reason: "empty_text", requestId, elapsedMs: Date.now() - startedAt };
++    }
++    return {
++      ok: true,
++      text: record.text,
++      tier,
++      speechDetected: true,
++      usedVocabulary,
++      requestId,
++      elapsedMs: Date.now() - startedAt,
++    };
++  } catch (cause) {
++    if (cause instanceof SpeechCascadeAbortedError || input.signal.aborted) {
++      throw cause instanceof SpeechCascadeAbortedError
++        ? cause
++        : new SpeechCascadeAbortedError(input.signal.reason);
++    }
++    if (timeoutController.signal.aborted) {
++      return { ok: false, reason: "timeout", requestId, elapsedMs: Date.now() - startedAt };
++    }
++    const message = cause instanceof Error && cause.message === "response_too_large"
++      ? "response_too_large"
++      : "network_error";
++    return { ok: false, reason: message, requestId, elapsedMs: Date.now() - startedAt };
++  } finally {
++    clearTimeout(timer);
++  }
++}

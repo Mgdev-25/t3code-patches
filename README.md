@@ -9,7 +9,7 @@ decisions.
 
 - `patches.json` is the list. Upstream PRs come first, each pinned to a head
   SHA with its saved diff in `patches/upstream/`. Own patches follow, each with
-  its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 15
+  its Shell bug, its check and a `dropWhen` line, in `patches/own/`. At most 16
   own patches, bug fixes only. Morgan allowed these exceptions:
   - `1448-form-free-text-mic`, the mic button in the free-text answer of a
     question form, in Shell issue 1448.
@@ -31,6 +31,12 @@ decisions.
   - `45-antigravity-usage-bar`, restoring local Antigravity usage bar and
     quota limit reporting, on 2026-11-26 in
     [t3code-patches issue 45](https://github.com/Mgdev-25/t3code-patches/issues/45).
+  - `53-speech-cascade-hook`, optional loopback speech cascade hook in
+    `SpeechService` forwarding recorded PCM audio and custom vocabulary to the
+    local cascade daemon for `omarchy-cloud` Qwen3-ASR and Vertex AI
+    `gemini-3.5-transcribe` with local Parakeet Ultra fallback, on 2026-11-26 in
+    [t3code-patches issue 53](https://github.com/Mgdev-25/t3code-patches/issues/53)
+    and [Shell issue 1743](https://github.com/Mgdev-25/shell/issues/1743).
 - `.github/workflows/nightly.yml` runs with no model. Its cron asks for a run
   every 30 minutes, but GitHub drops most of these runs. So the Shell timer
   `patch-store-gate` on Morgan's PC also starts it for each new nightly with no

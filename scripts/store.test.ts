@@ -88,15 +88,15 @@ test("a patch that adds a database migration is refused", () => {
   assert.equal(refusalOf(["apps/server/src/x.ts"]), undefined);
 });
 
-test("the list allows at most 15 own patches, each with title, summary, check and dropWhen", () => {
+test("the list allows at most 16 own patches, each with title, summary, check and dropWhen", () => {
   const own = (id: string) => ({ id, bug: 1, file: "f", title: "Title", summary: "Summary.", check: "c", dropWhen: "d" });
   const list: PatchList = {
     keepDays: 10,
     upstream: [],
-    own: Array.from({ length: 16 }, (_, index) => own(`p${index}`)),
+    own: Array.from({ length: 17 }, (_, index) => own(`p${index}`)),
   };
-  assert.match(validateList(list).join(), /cap is 15/);
-  assert.deepEqual(validateList({ ...list, own: list.own.slice(0, 15) }), []);
+  assert.match(validateList(list).join(), /cap is 16/);
+  assert.deepEqual(validateList({ ...list, own: list.own.slice(0, 16) }), []);
   assert.match(validateList({ ...list, own: [{ ...own("x"), dropWhen: " " }] }).join(), /dropWhen/);
   assert.match(validateList({ ...list, own: [{ ...own("x"), title: " " }] }).join(), /title and a summary/);
   assert.match(validateList({ ...list, own: [{ ...own("x"), title: "Bad *title*" }] }).join(), /'\*'/);
