@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/provider/AntigravityProvider.test.ts b/apps/server/src/provider/AntigravityProvider.test.ts
-index 72e00bfb75..db5bcee763 100644
+index 72e00bfb..db5bcee7 100644
 --- a/apps/server/src/provider/AntigravityProvider.test.ts
 +++ b/apps/server/src/provider/AntigravityProvider.test.ts
 @@ -9,6 +9,7 @@ import {
@@ -351,7 +351,7 @@ index 72e00bfb75..db5bcee763 100644
 +  );
  });
 diff --git a/apps/server/src/provider/AntigravityProvider.ts b/apps/server/src/provider/AntigravityProvider.ts
-index fccf11d663..be25bff118 100644
+index 29def158..70b9afc0 100644
 --- a/apps/server/src/provider/AntigravityProvider.ts
 +++ b/apps/server/src/provider/AntigravityProvider.ts
 @@ -8,13 +8,18 @@ import {
@@ -371,9 +371,9 @@ index fccf11d663..be25bff118 100644
  import * as Predicate from "effect/Predicate";
 +import * as Ref from "effect/Ref";
  import * as Result from "effect/Result";
+ import * as Schema from "effect/Schema";
  import * as Stream from "effect/Stream";
- import * as SubscriptionRef from "effect/SubscriptionRef";
-@@ -37,6 +42,7 @@ import {
+@@ -38,6 +43,7 @@ import {
    isCommandMissingCause,
    type ServerProviderDraft,
  } from "@t3tools/provider-core/server/snapshotProbe";
@@ -381,7 +381,7 @@ index fccf11d663..be25bff118 100644
  
  import { antigravityThinkingConfig } from "./acp/AntigravityAcpSupport.ts";
  
-@@ -46,6 +52,25 @@ const HEALTH_CHECK_TIMEOUT_MS = 90_000;
+@@ -47,6 +53,25 @@ const HEALTH_CHECK_TIMEOUT_MS = 90_000;
  const SIGN_IN_MESSAGE = "Sign in with Google to use Antigravity.";
  const AUTH_UNCHECKED_MESSAGE =
    "Antigravity is installed. Google account access is not checked yet.";
@@ -407,8 +407,8 @@ index fccf11d663..be25bff118 100644
  
  type SessionSetupResult = Pick<
    AcpSessionRuntime.AcpSessionRuntimeStartResult["sessionSetupResult"],
-@@ -196,6 +221,8 @@ interface AntigravityProviderOptions {
-     EffectAcpErrors.AcpError | ProviderSetupError
+@@ -204,6 +229,8 @@ interface AntigravityProviderOptions {
+     EffectAcpErrors.AcpError | ProviderSetupError | AntigravityProbeIncompatibility
    >;
    readonly supportsTextGeneration: Effect.Effect<boolean>;
 +  readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
@@ -416,7 +416,7 @@ index fccf11d663..be25bff118 100644
    readonly maintenanceCapabilities?: ProviderMaintenanceCapabilities;
    readonly auth?: { readonly type: string; readonly label: string };
    /** Modes the last session advertised, saved because initialize alone does not report them. */
-@@ -298,8 +325,107 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -306,8 +333,107 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
      Effect.flatMap((state) => options.stampIdentity(state.draft)),
    );
  
@@ -524,15 +524,15 @@ index fccf11d663..be25bff118 100644
      const before = yield* SubscriptionRef.get(metadata);
      const timeoutMs = resolveProviderProbeTimeoutMs(
        "antigravity",
-@@ -345,6 +471,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
-           version: version === "unknown" ? draft.version : version || draft.version,
+@@ -357,6 +483,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+           version: version === "unknown" ? previousVersion : version || previousVersion,
            status: errorMessage ? "error" : authenticated ? "ready" : "warning",
            checkedAt: updatedAt,
 +          usageLimits: missingInstallation ? undefined : draft.usageLimits,
            ...(missingInstallation
              ? {
                  models: [],
-@@ -371,7 +498,21 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -383,7 +510,21 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
        const stored = deferFailure && state.draft.status === "ready" ? state : checked;
        return [checked, stored === state ? Option.none() : Option.some(stored)];
      });
@@ -555,7 +555,7 @@ index fccf11d663..be25bff118 100644
    });
  
    const maintenanceCapabilities =
-@@ -390,10 +531,17 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -402,10 +543,17 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
      enrichSnapshot: ({ publishSnapshot }) =>
        SubscriptionRef.changes(metadata).pipe(
          Stream.runForEach((state) =>
@@ -574,7 +574,7 @@ index fccf11d663..be25bff118 100644
  
    const onSessionStarted = Effect.fn("AntigravityProvider.onSessionStarted")(function* (
      started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
-@@ -461,6 +609,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -473,6 +621,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
        return [draft.supportedRuntimeModes, next] as const;
      });
      yield* rememberRuntimeModes(previousModes, supportedRuntimeModes);
@@ -582,7 +582,7 @@ index fccf11d663..be25bff118 100644
    });
  
    const onConfigOptionsUpdated = Effect.fn("AntigravityProvider.onConfigOptionsUpdated")(function* (
-@@ -520,7 +669,9 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -532,7 +681,9 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
    });
  
    const clearAccountMetadata = Effect.fn("AntigravityProvider.clearAccountMetadata")(function* () {
@@ -592,7 +592,7 @@ index fccf11d663..be25bff118 100644
      const updatedAt = DateTime.formatIso(yield* DateTime.now);
      const previousModes = yield* SubscriptionRef.modify(metadata, (state) => [
        state.draft.supportedRuntimeModes,
-@@ -541,6 +692,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -553,6 +704,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
            workspaceSnapshots: [],
            supportedRuntimeModes: RUNTIME_MODES_WITHOUT_AUTO,
            supportsTextGeneration: false,
@@ -600,7 +600,7 @@ index fccf11d663..be25bff118 100644
          },
        } satisfies AntigravityProviderState,
      ]);
-@@ -549,6 +701,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -561,6 +713,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
      workspaceCommands.clear();
      thinkingLevels.clear();
      defaultModelSlug = undefined;
@@ -608,7 +608,7 @@ index fccf11d663..be25bff118 100644
    });
  
    const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* (
-@@ -587,6 +740,19 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
+@@ -599,6 +752,19 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
      onSessionStarted,
      onConfigOptionsUpdated,
      onAvailableCommands,
@@ -629,7 +629,7 @@ index fccf11d663..be25bff118 100644
      onAuthRequired: clearAccountMetadata(),
      snapshotForCwd,
 diff --git a/apps/server/src/provider/Drivers/AntigravityDriver.test.ts b/apps/server/src/provider/Drivers/AntigravityDriver.test.ts
-index c4b7cf3f99..19451dd10c 100644
+index bd3181bc..e6be28ca 100644
 --- a/apps/server/src/provider/Drivers/AntigravityDriver.test.ts
 +++ b/apps/server/src/provider/Drivers/AntigravityDriver.test.ts
 @@ -26,6 +26,7 @@ import * as Redacted from "effect/Redacted";
@@ -654,10 +654,10 @@ index c4b7cf3f99..19451dd10c 100644
    Layer.provideMerge(
      Layer.mock(BackgroundPolicy.BackgroundPolicy)({
 diff --git a/apps/server/src/provider/Drivers/AntigravityDriver.ts b/apps/server/src/provider/Drivers/AntigravityDriver.ts
-index 4d0af3d990..36c8e68123 100644
+index 2906cc65..5221e73a 100644
 --- a/apps/server/src/provider/Drivers/AntigravityDriver.ts
 +++ b/apps/server/src/provider/Drivers/AntigravityDriver.ts
-@@ -27,6 +27,7 @@ import * as Scope from "effect/Scope";
+@@ -28,6 +28,7 @@ import * as Scope from "effect/Scope";
  import * as Stream from "effect/Stream";
  import * as ChildProcess from "effect/process/ChildProcess";
  import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -665,15 +665,15 @@ index 4d0af3d990..36c8e68123 100644
  import * as AcpErrors from "effect-acp/errors";
  
  import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-@@ -70,6 +71,7 @@ import {
- import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
- import { ProviderDriverError } from "../Errors.ts";
- import { makeAntigravityProvider } from "../AntigravityProvider.ts";
+@@ -76,6 +77,7 @@ import {
+   AntigravityProbeIncompatibility,
+   makeAntigravityProvider,
+ } from "../AntigravityProvider.ts";
 +import { makeAntigravityUsageProbe } from "../antigravityUsageLimits.ts";
  import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
  import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
  import {
-@@ -113,6 +115,7 @@ export type AntigravityDriverEnv =
+@@ -119,6 +121,7 @@ export type AntigravityDriverEnv =
    | Digest.Digest
    | SecureRandom.SecureRandom
    | FileSystem.FileSystem
@@ -681,7 +681,7 @@ index 4d0af3d990..36c8e68123 100644
    | IdAllocator.IdAllocatorV2
    | McpProviderSessions.McpProviderSessions
    | ModelCatalog.ModelCatalog
-@@ -140,6 +143,7 @@ export const AntigravityDriver: ProviderDriver<
+@@ -146,6 +149,7 @@ export const AntigravityDriver: ProviderDriver<
      const digest = yield* Digest.Digest;
      const random = yield* SecureRandom.SecureRandom;
      const fileSystem = yield* FileSystem.FileSystem;
@@ -689,7 +689,7 @@ index 4d0af3d990..36c8e68123 100644
      const path = yield* Path.Path;
      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
      const host = yield* ProviderHost.ProviderHost;
-@@ -523,7 +527,11 @@ export const AntigravityDriver: ProviderDriver<
+@@ -578,7 +582,11 @@ export const AntigravityDriver: ProviderDriver<
      const authFlow: AntigravityAuth = yield* makeAntigravityAuth({
        instanceId,
        makeRuntime: makeDisposableRuntime,
@@ -702,7 +702,7 @@ index 4d0af3d990..36c8e68123 100644
        onSignedOut: Effect.suspend(() => provider.onSignedOut),
        usesBrowser: antigravityAuthUsesBrowser(auth.authMethod),
        codeLogin,
-@@ -568,10 +576,21 @@ export const AntigravityDriver: ProviderDriver<
+@@ -650,10 +658,21 @@ export const AntigravityDriver: ProviderDriver<
        };
      });
  
@@ -726,7 +726,7 @@ index 4d0af3d990..36c8e68123 100644
        rememberRuntimeModes: (modes) =>
 diff --git a/apps/server/src/provider/antigravityUsageLimits.test.ts b/apps/server/src/provider/antigravityUsageLimits.test.ts
 new file mode 100644
-index 0000000000..a5937146cf
+index 00000000..a5937146
 --- /dev/null
 +++ b/apps/server/src/provider/antigravityUsageLimits.test.ts
 @@ -0,0 +1,396 @@
@@ -1128,7 +1128,7 @@ index 0000000000..a5937146cf
 +});
 diff --git a/apps/server/src/provider/antigravityUsageLimits.ts b/apps/server/src/provider/antigravityUsageLimits.ts
 new file mode 100644
-index 0000000000..40f2a7a8e5
+index 00000000..40f2a7a8
 --- /dev/null
 +++ b/apps/server/src/provider/antigravityUsageLimits.ts
 @@ -0,0 +1,440 @@
@@ -1573,10 +1573,10 @@ index 0000000000..40f2a7a8e5
 +  };
 +});
 diff --git a/packages/shared/src/usageLimits.test.ts b/packages/shared/src/usageLimits.test.ts
-index b2ce03d006..d4c82558d2 100644
+index c2ef9dcc..19561839 100644
 --- a/packages/shared/src/usageLimits.test.ts
 +++ b/packages/shared/src/usageLimits.test.ts
-@@ -130,6 +130,17 @@ describe("new thread model fallback", () => {
+@@ -131,6 +131,17 @@ describe("new thread model fallback", () => {
      ["cursor", ["autoPercentUsed"], "claude-opus-5-5", false, undefined, undefined],
      ["cursor", ["autoPercentUsed"], "composer-2.5", false, undefined, undefined],
      ["cursor", ["autoPercentUsed", "apiPercentUsed"], "composer-2.5", true, undefined, undefined],
@@ -1594,7 +1594,7 @@ index b2ce03d006..d4c82558d2 100644
      ["codex", ["individual"], "gpt-5.5", true, undefined, undefined],
      ["opencode", ["go_weekly"], "opencode/big-pickle", false, undefined, undefined],
      ["opencode", ["go_weekly"], "opencode-go/big-pickle", true, undefined, undefined],
-@@ -1241,6 +1252,29 @@ describe("pooled account columns", () => {
+@@ -1242,6 +1253,29 @@ describe("pooled account columns", () => {
      expect(cursorUsageWindowDetails(ids.at(-1)!, pool)?.label).toBe(label);
    });
  
@@ -1625,10 +1625,10 @@ index b2ce03d006..d4c82558d2 100644
    it.each([
      ["claudeAgent", "13:00", 40, "14:00", 100],
 diff --git a/packages/shared/src/usageLimits.ts b/packages/shared/src/usageLimits.ts
-index 29a8b3ff38..b0012f9343 100644
+index 765d7dbc..f0abc303 100644
 --- a/packages/shared/src/usageLimits.ts
 +++ b/packages/shared/src/usageLimits.ts
-@@ -64,11 +64,52 @@ export function exhaustedUsageWindow(
+@@ -59,11 +59,52 @@ export function exhaustedUsageWindow(
        return exhausted.find(
          (window) => !window.id.startsWith("go_") || model.startsWith("opencode-go/"),
        );
@@ -1681,7 +1681,7 @@ index 29a8b3ff38..b0012f9343 100644
  export function resolveNewThreadModelSelection(input: {
    readonly defaultSelection: ModelSelection | null;
    readonly explicitSelection?: ModelSelection | null;
-@@ -547,6 +588,16 @@ function hasDuplicateCursorTotal(pool: LimitPool): boolean {
+@@ -542,6 +583,16 @@ function hasDuplicateCursorTotal(pool: LimitPool): boolean {
  }
  
  export function displayLimitWindows(pool: LimitPool) {
