@@ -1,21 +1,24 @@
 diff --git a/apps/mobile/src/features/issues/IssueCommentComposer.tsx b/apps/mobile/src/features/issues/IssueCommentComposer.tsx
-index 46082efd89..50f4e218c7 100644
+index b6e31687f8..ab5f57a4ac 100644
 --- a/apps/mobile/src/features/issues/IssueCommentComposer.tsx
 +++ b/apps/mobile/src/features/issues/IssueCommentComposer.tsx
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
+ import type { IssueCommentAudience } from "@t3tools/contracts";
  import { useGT } from "gt-react-native";
 -import { useRef, useState } from "react";
 +import { useEffect, useRef, useState } from "react";
  import { Platform, View } from "react-native";
  import Animated from "react-native-reanimated";
  
-@@ -65,18 +65,32 @@ export function IssueCommentComposer(props: {
+@@ -76,6 +76,7 @@ export function IssueCommentComposer(props: {
    const textStyle = useComposerTextStyle(bodyText);
    const chrome = useComposerChrome();
    const [focused, setFocused] = useState(false);
 +  const mounted = useRef(true);
    // Animate only while typing, as the thread composer does; a restored draft lands in place.
    const compactEditor = useCompactComposerEditor(bodyText, draft, Platform.OS === "ios" && focused);
+   const [contentHeight, setContentHeight] = useState(0);
+@@ -86,13 +87,26 @@ export function IssueCommentComposer(props: {
    const voiceInput = useVoiceInputController({
      ownerKey: props.ownerKey,
      label: props.label,
@@ -44,19 +47,19 @@ index 46082efd89..50f4e218c7 100644
    const voicePresentation = resolveVoiceComposerPresentation(
      voiceInput.state,
      voiceInput.elapsedSeconds,
-@@ -90,7 +104,10 @@ export function IssueCommentComposer(props: {
-     await editorRef.current?.flushPendingInput();
+@@ -107,7 +121,10 @@ export function IssueCommentComposer(props: {
      const submitted = latestDraft.current;
      if (submitted.trim().length === 0) return;
--    if ((await props.onSubmit(submitted)) && latestDraft.current === submitted) changeDraft("");
-+    if ((await props.onSubmit(submitted)) && latestDraft.current === submitted) {
+     const sent = await props.onSubmit(submitted, props.audiences ? audience : undefined);
+-    if (sent && latestDraft.current === submitted) changeDraft("");
++    if (sent && latestDraft.current === submitted) {
 +      changeDraft("");
 +      voiceInput.cancel();
 +    }
    };
    const send = () => {
      if (!canSend || sending.current) return Promise.resolve();
-@@ -151,6 +168,9 @@ export function IssueCommentComposer(props: {
+@@ -245,6 +262,9 @@ export function IssueCommentComposer(props: {
              <>
                <ComposerDictationError
                  error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
@@ -65,7 +68,7 @@ index 46082efd89..50f4e218c7 100644
 +                onRetry={voiceInput.retry}
                  onDismiss={voiceInput.cancel}
                />
-               <View onLayout={compactEditor.onRowLayout}>
+               {props.audiences ? (
 diff --git a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
 index a4d5c5e694..08a0b3669b 100644
 --- a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
