@@ -67,10 +67,10 @@ index 46082efd89..50f4e218c7 100644
                />
                <View onLayout={compactEditor.onRowLayout}>
 diff --git a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
-index e878f86581..442d8bce9a 100644
+index a4d5c5e694..08a0b3669b 100644
 --- a/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
 +++ b/apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx
-@@ -554,7 +554,7 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
+@@ -558,7 +558,7 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
    const insets = useSafeAreaInsets();
    // Set once the save lands, so the removal guard lets the editor close.
    const saved = useRef(false);
@@ -79,7 +79,7 @@ index e878f86581..442d8bce9a 100644
    const prompt = editor?.draft.prompt ?? "";
    const [selectionState, setSelectionState] = useState<{
      readonly ownerKey: string | null;
-@@ -579,14 +579,10 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
+@@ -583,14 +583,10 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
      ownerKey,
      label: editor?.draft.title.trim() || title,
      selection,
@@ -96,7 +96,7 @@ index e878f86581..442d8bce9a 100644
      },
      disabled: saving,
    });
-@@ -606,7 +602,7 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
+@@ -610,7 +606,7 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
          text: gt("Discard changes"),
          style: "destructive",
          onPress: () => {
@@ -227,7 +227,7 @@ index d4a7ba7912..d25f3e1b02 100644
    }
    startScheduledTaskEditor(null);
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 378d34a045..fd46d97035 100644
+index adaa72ca16..133f94db94 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
 @@ -39,7 +39,13 @@ import {
@@ -300,18 +300,29 @@ index 378d34a045..fd46d97035 100644
    });
    const voicePresentation = resolveVoiceComposerPresentation(voice.state, voice.elapsedSeconds);
    const showsDictation = voicePresentation.statusKind === "active";
-@@ -322,6 +363,9 @@ export function QuestionAttachments(props: {
+@@ -144,6 +185,10 @@ export function QuestionAttachments(props: {
+     releaseKeyboardFocus();
+     voice.cancel();
+   };
++  const retryDictation = () => {
++    releaseKeyboardFocus();
++    voice.retry();
++  };
+   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes an option selection's cleared draft into the uncontrolled native input
+   useEffect(() => {
+     if (props.value !== "" || nativeText.current === "") return;
+@@ -345,6 +390,9 @@ export function QuestionAttachments(props: {
        </View>
        <ComposerDictationError
          error={voice.state.phase === "error" ? voice.state.error : null}
 +        hasSavedRecording={voice.hasSavedRecording}
 +        disabled={props.disabled}
-+        onRetry={voice.retry}
++        onRetry={retryDictation}
          onDismiss={voice.cancel}
        />
      </View>
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-index 720ffddf55..b731c61064 100644
+index b8455f17c6..50dd1c2b14 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 @@ -10,6 +10,7 @@ type VoiceInput = {
@@ -322,12 +333,14 @@ index 720ffddf55..b731c61064 100644
  };
  
  const harness = vi.hoisted(() => ({
-@@ -17,8 +18,15 @@ const harness = vi.hoisted(() => ({
+@@ -17,10 +18,17 @@ const harness = vi.hoisted(() => ({
    phase: "idle" as "idle" | "recording",
    started: 0,
    stopped: 0,
 +  retried: 0,
    cancelled: 0,
+   keyboardDismissed: 0,
+   events: [] as string[],
    toolbarMounted: 0,
 +  hasSavedRecording: false,
 +  error: null as string | null,
@@ -338,7 +351,7 @@ index 720ffddf55..b731c61064 100644
  }));
  
  type Children = { children?: ReactNode };
-@@ -73,7 +81,14 @@ vi.mock("../../state/use-thread-selection", () => ({
+@@ -81,7 +89,14 @@ vi.mock("../../state/use-thread-selection", () => ({
    useThreadSelection: () => ({ selectedThread: { environmentId: "env-1", id: "thread-1" } }),
  }));
  vi.mock("../../state/entities", () => ({ useServerConfigs: () => new Map() }));
@@ -354,7 +367,7 @@ index 720ffddf55..b731c61064 100644
  vi.mock("../../state/use-composer-drafts", () => ({
    composerDraftsAtom: {},
    appendComposerDraftAttachments: () => 0,
-@@ -82,6 +97,27 @@ vi.mock("../../state/use-composer-drafts", () => ({
+@@ -90,6 +105,27 @@ vi.mock("../../state/use-composer-drafts", () => ({
  vi.mock("../../state/question-attachments", () => ({
    questionAttachmentDraftKey: (...parts: string[]) => parts.join(":"),
  }));
@@ -382,7 +395,7 @@ index 720ffddf55..b731c61064 100644
  vi.mock("../../state/question-attachment-preparation", () => ({
    pickQuestionAttachments: async () => ({ rejected: 0 }),
    startQuestionImagePreparation: () => ({
-@@ -108,7 +144,23 @@ vi.mock("../voice-input/ComposerDictationControl", () => ({
+@@ -116,7 +152,23 @@ vi.mock("../voice-input/ComposerDictationControl", () => ({
        Start voice input
      </button>
    ),
@@ -407,7 +420,7 @@ index 720ffddf55..b731c61064 100644
    ComposerDictationToolbar: ({ children }: Children) => {
      harness.toolbarMounted += 1;
      return <div>{children}</div>;
-@@ -132,14 +184,22 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
+@@ -140,10 +192,17 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
      harness.voice = input;
      return {
        isAvailable: true,
@@ -427,12 +440,18 @@ index 720ffddf55..b731c61064 100644
        audioLevels: { value: [] },
        elapsedSeconds: harness.phase === "recording" ? 2 : 0,
        freezesEditor: harness.phase === "recording",
-       start: () => harness.started++,
-+      retry: () => harness.retried++,
-       stop: () => harness.stopped++,
-       cancel: () => harness.cancelled++,
-     };
-@@ -308,3 +368,62 @@ it("keeps typed text when a saved answer loads later", () => {
+@@ -151,6 +210,10 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
+         harness.started++;
+         harness.events.push("voice.start");
+       },
++      retry: () => {
++        harness.retried++;
++        harness.events.push("voice.retry");
++      },
+       stop: () => {
+         harness.stopped++;
+         harness.events.push("voice.stop");
+@@ -348,3 +411,63 @@ it("keeps typed text when a saved answer loads later", () => {
  
    screen.unmount();
  });
@@ -452,6 +471,7 @@ index 720ffddf55..b731c61064 100644
 +    expect(discard).toBeTruthy();
 +    act(() => sendAgain!.click());
 +    expect(harness.retried).toBe(1);
++    expect(harness.events).toEqual(["keyboard.dismiss", "voice.retry"]);
 +    act(() => discard!.click());
 +    expect(harness.cancelled).toBe(1);
 +  } finally {
@@ -496,10 +516,10 @@ index 720ffddf55..b731c61064 100644
 +  }
 +});
 diff --git a/apps/mobile/src/features/threads/ThreadComposer.tsx b/apps/mobile/src/features/threads/ThreadComposer.tsx
-index d21ae90a03..935aee873a 100644
+index 2d108bde51..66936ec592 100644
 --- a/apps/mobile/src/features/threads/ThreadComposer.tsx
 +++ b/apps/mobile/src/features/threads/ThreadComposer.tsx
-@@ -807,6 +807,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
+@@ -808,6 +808,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
          >
            <ComposerDictationError
              error={voiceInput.state.phase === "error" ? voiceInput.state.error : null}
@@ -1758,10 +1778,10 @@ index d4e4ff145d..d00e56d0f6 100644
  
    const onChangeUserInputCustomAnswer = (
 diff --git a/packages/client-runtime/src/voice-input/controller.test.ts b/packages/client-runtime/src/voice-input/controller.test.ts
-index 15f5fea3aa..a38193a220 100644
+index d6828d1c98..ad6eefeab8 100644
 --- a/packages/client-runtime/src/voice-input/controller.test.ts
 +++ b/packages/client-runtime/src/voice-input/controller.test.ts
-@@ -908,4 +908,339 @@ describe("VoiceInputController", () => {
+@@ -910,4 +910,339 @@ describe("VoiceInputController", () => {
      expect(harness.recorder.record).not.toHaveBeenCalled();
      expect(harness.controller.currentState.error).toContain("background");
    });
@@ -2102,7 +2122,7 @@ index 15f5fea3aa..a38193a220 100644
 +  });
  });
 diff --git a/packages/client-runtime/src/voice-input/controller.ts b/packages/client-runtime/src/voice-input/controller.ts
-index 372bfd2a9a..c0601fee7a 100644
+index ffc6fb24c7..0266cdd5a7 100644
 --- a/packages/client-runtime/src/voice-input/controller.ts
 +++ b/packages/client-runtime/src/voice-input/controller.ts
 @@ -57,6 +57,7 @@ export type VoiceInputState = {
