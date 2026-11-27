@@ -1,5 +1,5 @@
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index a444498139..378d34a045 100644
+index c3d59c7cae..adaa72ca16 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
 @@ -83,6 +83,8 @@ export function QuestionAttachments(props: {
@@ -19,7 +19,7 @@ index a444498139..378d34a045 100644
        nativeText.current = text;
        setInput((current) => ({ text, version: current.version + 1 }));
        props.onChangeText(text);
-@@ -126,6 +129,13 @@ export function QuestionAttachments(props: {
+@@ -148,6 +151,13 @@ export function QuestionAttachments(props: {
      inputRef.current?.clear();
      setSelection({ start: 0, end: 0 });
    }, [props.value]);
@@ -33,7 +33,7 @@ index a444498139..378d34a045 100644
    const append = (
      key: string,
      attachments: Parameters<typeof appendComposerDraftAttachments>[1],
-@@ -253,6 +263,7 @@ export function QuestionAttachments(props: {
+@@ -275,6 +285,7 @@ export function QuestionAttachments(props: {
                submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
                editable={!props.disabled && !voice.freezesEditor}
                onChangeText={(text) => {
@@ -42,10 +42,10 @@ index a444498139..378d34a045 100644
                  props.onChangeText(text);
                }}
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-index 3b967ce8db..720ffddf55 100644
+index f7f8c39c6e..b8455f17c6 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-@@ -148,7 +148,7 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
+@@ -165,7 +165,7 @@ vi.mock("../voice-input/useVoiceInputController", () => ({
  
  import { QuestionAttachments } from "./QuestionAttachments";
  
@@ -54,7 +54,7 @@ index 3b967ce8db..720ffddf55 100644
    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
    harness.voice = null;
    harness.started = 0;
-@@ -161,25 +161,28 @@ function setup(options?: { readonly hidden?: boolean }) {
+@@ -180,25 +180,28 @@ function setup(options?: { readonly hidden?: boolean }) {
      question: "Type your answer",
      options: [],
      multiSelect: false,
@@ -97,7 +97,7 @@ index 3b967ce8db..720ffddf55 100644
    const input = () => container.querySelector("input")!;
    return {
      changes,
-@@ -187,6 +190,7 @@ function setup(options?: { readonly hidden?: boolean }) {
+@@ -206,6 +209,7 @@ function setup(options?: { readonly hidden?: boolean }) {
      focus,
      input,
      voice: () => harness.voice!,
@@ -105,9 +105,9 @@ index 3b967ce8db..720ffddf55 100644
      pressMic: () => {
        const mic = [...container.querySelectorAll("button")].find(
          (button) => button.textContent === "Start voice input",
-@@ -273,3 +277,34 @@ it("renders active dictation controls inline without ComposerDictationToolbar",
-     screen.unmount();
-   }
+@@ -313,3 +317,34 @@ it("blurs the focused input and dismisses the keyboard before starting dictation
+ 
+   screen.unmount();
  });
 +
 +it("shows an answer saved before an app restart that loads after the field mounted", () => {

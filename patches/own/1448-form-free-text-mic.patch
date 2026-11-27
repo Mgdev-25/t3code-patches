@@ -1,17 +1,30 @@
 diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
-index 8dcfb78747..eac13c018d 100644
+index 8dcfb78747..98452ab05a 100644
 --- a/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
 +++ b/apps/mobile/src/features/threads/PendingUserInputCard.test.tsx
-@@ -9,6 +9,8 @@ import type { PendingUserInput } from "../../lib/threadActivity";
+@@ -9,6 +9,9 @@ import type { PendingUserInput } from "../../lib/threadActivity";
  const harness = vi.hoisted(() => ({
    navigate: [] as Array<[string, object | undefined]>,
    openedUrls: [] as string[],
 +  voice: { isBusy: false, ownerKey: null as string | null },
 +  questionAttachmentsHidden: [] as Array<boolean | undefined>,
++  scrollsChildToFocus: [] as Array<boolean | undefined>,
  }));
  
  type Children = { children?: ReactNode };
-@@ -37,8 +39,25 @@ vi.mock("../../components/ui/AppText", () => ({
+@@ -16,7 +19,10 @@ type Children = { children?: ReactNode };
+ vi.mock("react-native", () => ({
+   Platform: { OS: "ios" },
+   View: ({ children }: Children) => <div>{children}</div>,
+-  ScrollView: ({ children }: Children) => <div>{children}</div>,
++  ScrollView: ({ children, scrollsChildToFocus }: Children & { scrollsChildToFocus?: boolean }) => {
++    harness.scrollsChildToFocus.push(scrollsChildToFocus);
++    return <div>{children}</div>;
++  },
+   Pressable: ({ children, onPress }: Children & { onPress?: () => void }) => (
+     <div onClick={onPress}>{children}</div>
+   ),
+@@ -37,8 +43,25 @@ vi.mock("../../components/ui/AppText", () => ({
    AppText: ({ children }: Children) => <span>{children}</span>,
  }));
  vi.mock("../../components/ui/ControlPill", () => ({ ControlPill: () => null }));
@@ -39,32 +52,49 @@ index 8dcfb78747..eac13c018d 100644
  vi.mock("../files/FileMarkdownPreview", () => ({
    useMarkdownPreviewStyles: () => ({ nativeTextStyle: {} }),
  }));
-@@ -70,10 +89,14 @@ vi.mock("@react-navigation/native", () => ({
+@@ -70,23 +93,31 @@ vi.mock("@react-navigation/native", () => ({
  
  import { PendingUserInputCard } from "./PendingUserInputCard";
  
 -function setup(questionMarkdown: string) {
 +function setup(
 +  questionMarkdown: string,
-+  options?: { readonly collapsed?: boolean; readonly allowCustomAnswer?: boolean },
++  options?: {
++    readonly collapsed?: boolean;
++    readonly allowCustomAnswer?: boolean;
++    readonly questionCount?: number;
++  },
 +) {
    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
    harness.navigate = [];
    harness.openedUrls = [];
 +  harness.questionAttachmentsHidden = [];
++  harness.scrollsChildToFocus = [];
  
++  const questionCount = options?.questionCount ?? 1;
    const pendingUserInput = {
      requestId: "request-1" as RuntimeRequestId,
-@@ -84,7 +107,7 @@ function setup(questionMarkdown: string) {
-         header: "Review",
-         question: questionMarkdown,
-         options: [],
+     responseCapability: "resumable",
+-    questions: [
+-      {
+-        id: "question-1",
+-        header: "Review",
+-        question: questionMarkdown,
+-        options: [],
 -        allowCustomAnswer: false,
-+        allowCustomAnswer: options?.allowCustomAnswer ?? false,
-       },
-     ],
+-      },
+-    ],
++    questions: Array.from({ length: questionCount }, (_, index) => ({
++      id: `question-${index + 1}`,
++      header: index === 0 ? "Review" : `Question ${index + 1}`,
++      question: questionMarkdown,
++      options: [],
++      allowCustomAnswer: options?.allowCustomAnswer ?? false,
++    })),
    } as unknown as PendingUserInput;
-@@ -101,10 +124,10 @@ function setup(questionMarkdown: string) {
+   const container = document.createElement("div");
+   const root = createRoot(container);
+@@ -101,10 +132,10 @@ function setup(questionMarkdown: string) {
          maxHeight={{ value: 600 } as never}
          cardProgress={{ value: 1, set: () => {} } as never}
          cardCoverage={{ value: 0, set: () => {} } as never}
@@ -77,7 +107,7 @@ index 8dcfb78747..eac13c018d 100644
          respondingUserInputId={null}
          onSelectOption={() => {}}
          onChangeCustomAnswer={() => {}}
-@@ -114,6 +137,10 @@ function setup(questionMarkdown: string) {
+@@ -114,6 +145,10 @@ function setup(questionMarkdown: string) {
      ),
    );
    return {
@@ -88,7 +118,7 @@ index 8dcfb78747..eac13c018d 100644
      async pressLink(label: string) {
        const link = [...container.querySelectorAll("button")].find(
          (button) => button.textContent === label,
-@@ -140,3 +167,28 @@ it("opens a workspace file link in a question in the thread's file viewer", asyn
+@@ -140,3 +175,47 @@ it("opens a workspace file link in a question in the thread's file viewer", asyn
      ],
    ]);
  });
@@ -117,8 +147,27 @@ index 8dcfb78747..eac13c018d 100644
 +    expect(harness.questionAttachmentsHidden).toEqual([true]);
 +  }
 +});
++
++it("disables scroll-to-focus on multi-question forms while a question answer is dictated", () => {
++  harness.voice = { isBusy: false, ownerKey: null };
++  {
++    using _idle = setup("Which path?", { questionCount: 2, allowCustomAnswer: true });
++    expect(harness.scrollsChildToFocus).toEqual([true]);
++  }
++  harness.voice = { isBusy: true, ownerKey: "env-1:thread-1:request-1:question-2" };
++  {
++    using _dictating = setup("Which path?", { questionCount: 2, allowCustomAnswer: true });
++    expect(harness.scrollsChildToFocus).toEqual([false]);
++  }
++  harness.voice = { isBusy: true, ownerKey: "composer-draft" };
++  {
++    using _other = setup("Which path?", { questionCount: 2, allowCustomAnswer: true });
++    expect(harness.scrollsChildToFocus).toEqual([true]);
++  }
++  harness.voice = { isBusy: false, ownerKey: null };
++});
 diff --git a/apps/mobile/src/features/threads/PendingUserInputCard.tsx b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
-index 34d44a3098..0e92fe2cad 100644
+index 34d44a3098..0fed085b3f 100644
 --- a/apps/mobile/src/features/threads/PendingUserInputCard.tsx
 +++ b/apps/mobile/src/features/threads/PendingUserInputCard.tsx
 @@ -37,6 +37,8 @@ import {
@@ -151,7 +200,16 @@ index 34d44a3098..0e92fe2cad 100644
    const setDirection = markdownProseDirection(
      props.pendingUserInput.questions
        .flatMap((question) => [
-@@ -368,6 +384,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+@@ -272,6 +288,8 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+         contentContainerClassName="gap-2.5 pb-1"
+         keyboardShouldPersistTaps="handled"
+         nestedScrollEnabled
++        // Keep Android from scrolling back to an earlier focused answer field during dictation.
++        scrollsChildToFocus={!isDictating}
+         showsVerticalScrollIndicator
+         style={{ flexShrink: 1 }}
+       >
+@@ -368,6 +386,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                    question={question}
                    questions={props.pendingUserInput.questions}
                    disabled={responseDisabled}
@@ -159,7 +217,7 @@ index 34d44a3098..0e92fe2cad 100644
                    value={draft?.customAnswer ?? ""}
                    onChangeText={(value) =>
                      props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
-@@ -383,7 +400,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
+@@ -383,7 +402,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
          label={gt("Submit answers")}
          fullWidth
          tone={props.answers ? "primary" : "secondary"}
@@ -171,9 +229,18 @@ index 34d44a3098..0e92fe2cad 100644
        />
        {props.pendingUserInput.dismissible ? (
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.tsx b/apps/mobile/src/features/threads/QuestionAttachments.tsx
-index 176f23773a..a444498139 100644
+index 176f23773a..c3d59c7cae 100644
 --- a/apps/mobile/src/features/threads/QuestionAttachments.tsx
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.tsx
+@@ -8,7 +8,7 @@ import { useNativePaste } from "../../lib/useNativePaste";
+ import { convertPastedImagesToAttachments } from "../../lib/composerImages";
+ import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS, type UserInputQuestion } from "@t3tools/contracts";
+ import { useAtomValue } from "@effect/atom-react";
+-import { View, type TextInputInstance } from "react-native";
++import { Keyboard, View, type TextInputInstance } from "react-native";
+ import { useEffect, useEffectEvent, useRef, useState } from "react";
+ import { ComposerAttachmentButton } from "./ComposerAttachmentButton";
+ import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 @@ -30,12 +30,23 @@ import {
    pickQuestionAttachments,
    startQuestionImagePreparation,
@@ -198,7 +265,7 @@ index 176f23773a..a444498139 100644
    value: string;
    onChangeText: (value: string) => void;
    onInputFocusChange?: ((focused: boolean) => void) | undefined;
-@@ -67,16 +78,53 @@ export function QuestionAttachments(props: {
+@@ -67,16 +78,75 @@ export function QuestionAttachments(props: {
    // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases keyboard ownership on unmount, since an unmounted native input never emits blur
    useEffect(() => () => releaseFocus(), []);
    // A controlled value makes Fabric rebuild the native text on every keystroke, which discards
@@ -246,6 +313,28 @@ index 176f23773a..a444498139 100644
 +  });
 +  const voicePresentation = resolveVoiceComposerPresentation(voice.state, voice.elapsedSeconds);
 +  const showsDictation = voicePresentation.statusKind === "active";
++  // Blur any focused answer before hiding this input or changing sibling mic rows so Android
++  // does not move focus to an earlier question and scroll the form back to the top.
++  const releaseKeyboardFocus = () => {
++    inputRef.current?.blur();
++    Keyboard.dismiss();
++    if (focusedRef.current) {
++      focusedRef.current = false;
++      onInputFocusChange?.(false);
++    }
++  };
++  const startDictation = () => {
++    releaseKeyboardFocus();
++    voice.start();
++  };
++  const stopDictation = () => {
++    releaseKeyboardFocus();
++    voice.stop();
++  };
++  const cancelDictation = () => {
++    releaseKeyboardFocus();
++    voice.cancel();
++  };
    // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes an option selection's cleared draft into the uncontrolled native input
    useEffect(() => {
      if (props.value !== "" || nativeText.current === "") return;
@@ -255,7 +344,7 @@ index 176f23773a..a444498139 100644
    }, [props.value]);
    const append = (
      key: string,
-@@ -192,29 +240,79 @@ export function QuestionAttachments(props: {
+@@ -192,29 +262,80 @@ export function QuestionAttachments(props: {
        />
        <FilePreviewModal source={previewFile} onRequestClose={() => setPreviewFile(null)} />
        <VideoPreviewModal source={previewVideo} onRequestClose={() => setPreviewVideo(null)} />
@@ -304,6 +393,7 @@ index 176f23773a..a444498139 100644
 +                onInputFocusChange?.(true);
 +              }}
 +              onBlur={() => {
++                if (!focusedRef.current) return;
 +                focusedRef.current = false;
 +                onInputFocusChange?.(false);
 +              }}
@@ -318,8 +408,8 @@ index 176f23773a..a444498139 100644
 +              state={voice.state}
 +              isAvailable={voice.isAvailable}
 +              disabled={props.disabled}
-+              onStart={voice.start}
-+              onCancel={voice.cancel}
++              onStart={startDictation}
++              onCancel={cancelDictation}
 +            />
 +          </View>
 +        ) : null}
@@ -330,7 +420,7 @@ index 176f23773a..a444498139 100644
 +            <View className="h-11 flex-row items-center">
 +              <ComposerDictationCancelAction
 +                presentation={voicePresentation}
-+                onCancel={voice.cancel}
++                onCancel={cancelDictation}
 +              />
 +              <ComposerDictationStatus
 +                audioLevels={voice.audioLevels}
@@ -343,9 +433,9 @@ index 176f23773a..a444498139 100644
 +                presentation={voicePresentation}
 +                isAvailable={voice.isAvailable}
 +                disabled={props.disabled}
-+                onStart={voice.start}
-+                onConfirm={voice.stop}
-+                onCancel={voice.cancel}
++                onStart={startDictation}
++                onConfirm={stopDictation}
++                onCancel={cancelDictation}
 +              />
 +            </View>
 +          </View>
@@ -360,10 +450,10 @@ index 176f23773a..a444498139 100644
  }
 diff --git a/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
 new file mode 100644
-index 0000000000..3b967ce8db
+index 0000000000..f7f8c39c6e
 --- /dev/null
 +++ b/apps/mobile/src/features/threads/QuestionAttachments.voice.test.tsx
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,315 @@
 +import type { UserInputQuestion } from "@t3tools/contracts";
 +import type { ReactNode } from "react";
 +import { act, forwardRef } from "react";
@@ -384,12 +474,20 @@ index 0000000000..3b967ce8db
 +  started: 0,
 +  stopped: 0,
 +  cancelled: 0,
++  keyboardDismissed: 0,
++  events: [] as string[],
 +  toolbarMounted: 0,
 +}));
 +
 +type Children = { children?: ReactNode };
 +
 +vi.mock("react-native", () => ({
++  Keyboard: {
++    dismiss: () => {
++      harness.keyboardDismissed += 1;
++      harness.events.push("keyboard.dismiss");
++    },
++  },
 +  View: ({ children }: Children) => <div>{children}</div>,
 +}));
 +vi.mock("expo-paste-input", () => ({
@@ -505,9 +603,18 @@ index 0000000000..3b967ce8db
 +      audioLevels: { value: [] },
 +      elapsedSeconds: harness.phase === "recording" ? 2 : 0,
 +      freezesEditor: harness.phase === "recording",
-+      start: () => harness.started++,
-+      stop: () => harness.stopped++,
-+      cancel: () => harness.cancelled++,
++      start: () => {
++        harness.started++;
++        harness.events.push("voice.start");
++      },
++      stop: () => {
++        harness.stopped++;
++        harness.events.push("voice.stop");
++      },
++      cancel: () => {
++        harness.cancelled++;
++        harness.events.push("voice.cancel");
++      },
 +    };
 +  },
 +}));
@@ -520,6 +627,8 @@ index 0000000000..3b967ce8db
 +  harness.started = 0;
 +  harness.stopped = 0;
 +  harness.cancelled = 0;
++  harness.keyboardDismissed = 0;
++  harness.events = [];
 +  harness.toolbarMounted = 0;
 +  const question = {
 +    id: "question-1",
@@ -634,16 +743,37 @@ index 0000000000..3b967ce8db
 +    expect(harness.stopped).toBe(1);
 +    act(() => cancel!.click());
 +    expect(harness.cancelled).toBe(1);
++    expect(harness.events).toEqual([
++      "keyboard.dismiss",
++      "voice.stop",
++      "keyboard.dismiss",
++      "voice.cancel",
++    ]);
 +  } finally {
 +    harness.phase = "idle";
 +    screen.unmount();
 +  }
 +});
++
++it("blurs the focused input and dismisses the keyboard before starting dictation", () => {
++  const screen = setup();
++  act(() => screen.input().focus());
++  expect(document.activeElement).toBe(screen.input());
++  expect(screen.focus).toEqual([true]);
++
++  screen.pressMic();
++
++  expect(document.activeElement).not.toBe(screen.input());
++  expect(screen.focus).toEqual([true, false]);
++  expect(harness.events).toEqual(["keyboard.dismiss", "voice.start"]);
++
++  screen.unmount();
++});
 diff --git a/apps/mobile/vite.config.ts b/apps/mobile/vite.config.ts
-index c3dd6195f3..bb9fd63433 100644
+index 8ace8a6ec1..ac2b5eed63 100644
 --- a/apps/mobile/vite.config.ts
 +++ b/apps/mobile/vite.config.ts
-@@ -42,6 +42,7 @@ const reactTests = [
+@@ -46,6 +46,7 @@ const reactTests = [
    "src/components/ui/FilePreviewSession.test.tsx",
    "src/features/threads/UsageLimitRecoveryCard.test.tsx",
    "src/features/threads/PendingUserInputCard.test.tsx",
