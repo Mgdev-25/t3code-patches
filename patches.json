@@ -138,9 +138,9 @@
       "bug": 44,
       "file": "patches/own/44-acp-shutdown-race.patch",
       "title": "Preserve pending forms on reboot",
-      "summary": "Orders agent scopes before the T3 boot service and drops late shutdown exit cancellations so pending forms survive reboot.",
-      "check": "Run vp test run apps/server/src/process/agentScope.test.ts apps/server/src/orchestration-v2/ProviderSessionManager.test.ts: agent scopes include --property=Before=t3code.service when T3_BOOT_SERVICE_UNIT is set, shutdown drops late exit cancellations so user_input stays pending, and unexpected non-shutdown exits still report error. Tracked in t3code-patches issue 44 and Shell issue 1716.",
-      "dropWhen": "Upstream agentScope orders transient agent scopes before T3_BOOT_SERVICE_UNIT on reboot and ProviderSessionManager drops late exit cancellations during programmatic server shutdown."
+      "summary": "Preserves pending forms across reboot and blocks restart continuations and queued runs until the form is answered or dismissed.",
+      "check": "Run vp test run apps/server/src/process/agentScope.test.ts apps/server/src/orchestration-v2/ProviderSessionManager.test.ts apps/server/src/orchestration-v2/RestartContinuation.test.ts apps/server/src/orchestration-v2/ProjectionStore.test.ts apps/server/src/orchestration-v2/runtimeLayer.test.ts: agent scopes include --property=Before=t3code.service when T3_BOOT_SERVICE_UNIT is set, shutdown drops late exit cancellations so user_input stays pending, restartContinuationBlocked and canStartQueuedRun/startNextQueuedRunOnce block while a message-mode user_input form is pending, and answering or dismissing the form resumes and drains waiting runs. Tracked in t3code-patches issues 44 and 62 and Shell issue 1716.",
+      "dropWhen": "Upstream agentScope orders transient agent scopes before T3_BOOT_SERVICE_UNIT on reboot, ProviderSessionManager drops late exit cancellations during programmatic server shutdown, and RestartContinuation, ProjectionStore, and Orchestrator block continuations and queued runs while a pending user_input form waits in message mode."
     },
     {
       "id": "44-muse-usage-cache",
